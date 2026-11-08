@@ -1,0 +1,7 @@
+PySide6==6.12.0
+qasync==0.28.0
+twitchAPI==4.5.0
+keyring==25.7.0
+ngrok==1.7.0
+cryptography==50.0.2
+edge-tts==7.3.1

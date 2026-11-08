@@ -1,0 +1,19 @@
+# Entorno virtual
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Datos locales del bot (configuración, logs, base de datos)
+data/
+
+# Empaquetado (scripts/release.py)
+build/
+dist/
+*.stackdump
+
+# Editores / sistema
+.vscode/
+.idea/
+Thumbs.db
