@@ -50,7 +50,7 @@ WATCH_FAILED_CODE = 1000
 
 _HTML = """<!doctype html>
 <html><head><meta charset="utf-8">
-<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}#p{width:100%;height:100%}</style>
+<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}#p{width:100%;height:100%;pointer-events:none}</style>
 </head><body><div id="p"></div>
 <script>
 const TOKEN = __TOKEN__;
@@ -64,7 +64,7 @@ document.head.appendChild(tag);
 function onYouTubeIframeAPIReady(){
   player = new YT.Player('p', {
     width: '100%', height: '100%',
-    playerVars: {playsinline: 1, rel: 0, origin: location.origin},
+    playerVars: {playsinline: 1, rel: 0, controls: 0, disablekb: 1, fs: 0, iv_load_policy: 3, origin: location.origin},
     events: {
       onReady: () => send({ev: 'ready'}),
       onStateChange: (e) => send({ev: 'state', state: e.data}),
@@ -77,6 +77,7 @@ function pauseVideo(){ player.pauseVideo(); }
 function resumeVideo(){ player.playVideo(); }
 function stopVideo(){ current = ""; player.stopVideo(); }
 function setVolume(v){ player.setVolume(v); }
+function seekVideo(s){ player.seekTo(s, true); }
 </script></body></html>"""
 
 # Script para la página youtube.com/watch. Corre en un mundo aislado (ApplicationWorld):
@@ -88,6 +89,7 @@ _WATCH_JS = r"""
   const TIMEOUT_MS = 30000;
   const send = (o) => console.log(PREFIX + JSON.stringify(o));
   if (location.hostname.startsWith('consent.')) { send({ev: 'consent'}); return; }
+  send({ev: 'page'});
   const videoId = () => new URLSearchParams(location.search).get('v') || '';
 
   const st = {volume: __VOLUME__ / 100, paused: false, id: '', start: 0,
@@ -95,11 +97,13 @@ _WATCH_JS = r"""
   const reset = (id) => Object.assign(st, {id, start: Date.now(), playing: false, ended: false, failed: false});
   reset(videoId());
 
-  // El reproductor ocupa toda la vista
+  // El reproductor ocupa toda la vista, sin controles: todo se maneja desde la app
   const css = document.createElement('style');
   css.textContent = `html,body{overflow:hidden!important;background:#000!important}
     #movie_player{position:fixed!important;inset:0!important;width:100vw!important;
-      height:100vh!important;z-index:2147483647!important;background:#000!important}`;
+      height:100vh!important;z-index:2147483647!important;background:#000!important;pointer-events:none!important}
+    .ytp-chrome-top,.ytp-chrome-bottom,.ytp-gradient-top,.ytp-gradient-bottom,.ytp-large-play-button,
+    .ytp-pause-overlay,.ytp-ce-element,.ytp-endscreen-content{display:none!important}`;
   (document.head || document.documentElement).appendChild(css);
   setTimeout(() => window.dispatchEvent(new Event('resize')), 1500);
 
@@ -132,11 +136,27 @@ _WATCH_JS = r"""
     else if (!st.playing && !st.paused && Date.now() - st.start > TIMEOUT_MS) fail('timeout');
   }
   setInterval(tick, 400);
+  tick();
+
+  // YouTube pone su propio volumen (hasta el 100 %) al arrancar el vídeo. Con la vista oculta,
+  // Chromium frena setInterval a una vez por segundo y eso se oía: se corrige con eventos, que
+  // no se frenan. Los eventos de vídeo no suben por el DOM, pero sí pasan por la fase de captura.
+  const enforceVolume = (e) => {
+    const v = e.target;
+    if (v instanceof HTMLVideoElement && Math.abs(v.volume - st.volume) > 0.005) v.volume = st.volume;
+  };
+  for (const name of ['volumechange', 'loadstart', 'loadedmetadata', 'play', 'playing'])
+    document.addEventListener(name, enforceVolume, true);
 
   window.__alpeka = {
     pause() { st.paused = true; tick(); },
     resume() { st.paused = false; tick(); },
     setVolume(v) { st.volume = Math.max(0, Math.min(100, v)) / 100; tick(); },
+    seek(s) {
+      const mp = document.querySelector('#movie_player');
+      const v = mp && mp.querySelector('video');
+      if (v && !mp.classList.contains('ad-showing') && !mp.classList.contains('ad-interrupting')) v.currentTime = s;
+    },
   };
 })();
 """
@@ -200,6 +220,9 @@ class WebPlayer(QObject):
         self.view = QStackedWidget()  # lo que muestra la pestaña Canciones
         self.view.addWidget(self._embed)
         self.view.addWidget(self._watch)
+        # El vídeo solo se mira: pausar, adelantar, etc. se hace desde los botones de la app.
+        # Excepción: el aviso de cookies de YouTube, que hay que poder responder (ver _handle_watch).
+        self.view.setEnabled(False)
 
         self._mode = "embed"           # "embed" | "watch"
         self._current = ""             # vídeo que se pidió reproducir
@@ -291,10 +314,14 @@ class WebPlayer(QObject):
             self._handle_ads(data)
             return
         if ev == "consent":
+            self.view.setEnabled(True)
             if not self._consent_warned:
                 self._consent_warned = True
                 log.warning("YouTube pide aceptar o rechazar las cookies: hazlo una vez en el "
                             "reproductor de la pestaña Canciones")
+            return
+        if ev == "page":
+            self.view.setEnabled(False)
             return
         video = str(data.get("video") or "")
         if self._mode != "watch" or not video or video != self._current:
@@ -331,6 +358,7 @@ class WebPlayer(QObject):
             self._mode = "embed"
             self._watch.setUrl(QUrl("about:blank"))
             self.view.setCurrentWidget(self._embed)
+            self.view.setEnabled(False)
 
     def _watch_js(self, code: str) -> None:
         self._watch_page.runJavaScript(f"window.__alpeka && window.__alpeka.{code}",
@@ -395,6 +423,14 @@ class WebPlayer(QObject):
                 " ? JSON.stringify([player.getCurrentTime(), player.getDuration()]) : ''",
                 0, done,
             )
+
+    def seek(self, seconds: float) -> None:
+        if not self._current:
+            return
+        if self._mode == "watch":
+            self._watch_js(f"seek({float(seconds):.2f})")
+        else:
+            self._embed_js(f"seekVideo({float(seconds):.2f})")
 
     def set_volume(self, volume: int) -> None:
         self._volume = int(volume)

@@ -5,15 +5,16 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtCore import QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QGuiApplication, QPainter
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
     QLabel,
     QLineEdit,
-    QProgressBar,
+    QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSlider,
     QStackedWidget,
     QWidget,
@@ -63,8 +64,87 @@ def eta_text(seconds: int) -> str:
     return f"En ~{m}m {s:02d}s" if m else f"En ~{s}s"
 
 
+def set_star(btn: QPushButton, favorite: bool, size: int = 16) -> None:
+    """Pone la estrella rellena si la canción está en el respaldo, y su tooltip."""
+    btn.setIcon(t.icon("star-filled" if favorite else "star", t.AMBER if favorite else t.TEXT_2, size))
+    btn.setToolTip("Quitar de favoritos (sale de la playlist de respaldo)" if favorite
+                   else "Añadir a favoritos (pasa a la playlist de respaldo)")
+
+
+class SeekBar(QWidget):
+    """Barra de progreso para adelantar: clic o arrastrar. Se envía al soltar."""
+
+    TRACK_H = 6
+    seeked = Signal(float)    # posición elegida, de 0 a 1
+    scrubbed = Signal(float)  # posición mientras se arrastra, de 0 a 1
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setFixedHeight(18)  # más alta que la línea que se pinta: así es fácil acertar
+        self.setMinimumWidth(60)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setAttribute(Qt.WA_Hover)
+        self.value = 0.0
+        self.dragging = False
+        self._seekable = False
+
+    def sizeHint(self) -> QSize:  # noqa: N802 (Qt)
+        return QSize(200, 18)
+
+    def set_seekable(self, seekable: bool) -> None:
+        self._seekable = seekable
+        self.setCursor(Qt.PointingHandCursor if seekable else Qt.ArrowCursor)
+        self.setToolTip("Haz clic o arrastra para adelantar" if seekable else "")
+        if not seekable:
+            self.dragging = False
+        self.update()
+
+    def set_value(self, value: float) -> None:
+        if not self.dragging:
+            self.value = max(0.0, min(1.0, value))
+            self.update()
+
+    def _track(self, event) -> None:
+        self.value = max(0.0, min(1.0, event.position().x() / max(1, self.width())))
+        self.update()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt)
+        if self._seekable and event.button() == Qt.LeftButton:
+            self.dragging = True
+            self._track(event)
+            self.scrubbed.emit(self.value)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 (Qt)
+        if self.dragging:
+            self._track(event)
+            self.scrubbed.emit(self.value)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 (Qt)
+        if self.dragging and event.button() == Qt.LeftButton:
+            self._track(event)
+            self.dragging = False
+            self.seeked.emit(self.value)
+
+    def paintEvent(self, _event) -> None:  # noqa: N802 (Qt)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        top = (self.height() - self.TRACK_H) / 2
+        radius = self.TRACK_H / 2
+        p.setBrush(QColor(t.BG_600))
+        p.drawRoundedRect(QRectF(0, top, self.width(), self.TRACK_H), radius, radius)
+        x = self.value * self.width()
+        if x > 0:
+            p.setBrush(QColor(t.ACCENT))
+            p.drawRoundedRect(QRectF(0, top, x, self.TRACK_H), radius, radius)
+        if self._seekable and (self.dragging or self.underMouse()):
+            p.setBrush(QColor("#ffffff"))
+            handle = max(6.0, min(self.width() - 6.0, x))
+            p.drawEllipse(QRectF(handle - 6, self.height() / 2 - 6, 12, 12))
+
+
 class QueueRow(QFrame):
-    def __init__(self, page: "SongsTab", song: Song, index: int, eta_s: int) -> None:
+    def __init__(self, page: "SongsTab", song: Song, index: int, eta_s: int, favorite: bool = False) -> None:
         super().__init__()
         self.setObjectName("row")
         title = ElidedLabel(song.title)
@@ -82,7 +162,10 @@ class QueueRow(QFrame):
         info = QWidget()
         info.setLayout(vbox(title_row, meta, spacing=4))
         repo = page.svc.repo
+        self.fav_btn = icon_button("star", "", lambda: page.svc.toggle_favorite(song), t.TEXT_2, 16)
+        set_star(self.fav_btn, favorite)
         lay = hbox(label(f"#{index}", size=14, bold=True, mono=True, color=t.ACCENT_SOFT), 4, source_box(), 6, info,
+                   self.fav_btn,
                    soon(icon_button("play", "", None, t.ACCENT_SOFT, 16, "iconBox"), "reproducir ya"),
                    icon_button("chevron-up", "Subir", lambda: repo.queue_move(song.id, -1), t.TEXT_2, 16),
                    icon_button("chevron-down", "Bajar", lambda: repo.queue_move(song.id, 1), t.TEXT_2, 16),
@@ -149,7 +232,9 @@ class SongsTab(QWidget):
         info = QWidget()
         info.setLayout(vbox(hbox(self._state_pill, self._by, self._src_pill, None, spacing=10),
                             self._title, self._channel, spacing=6))
-        top = hbox(self._art, info, icon_label("audio-lines", t.ACCENT, 32), spacing=20)
+        self._fav_btn = icon_button("star", "", self._toggle_favorite, t.TEXT_2, 22, "iconBox")
+        self._fav_btn.hide()
+        top = hbox(self._art, info, self._fav_btn, icon_label("audio-lines", t.ACCENT, 32), spacing=20)
         top.setStretchFactor(info, 1)
 
         self._play = icon_button("play", "Reproducir / pausar", self._toggle_play, "#ffffff", 20, "playBtn")
@@ -161,9 +246,9 @@ class SongsTab(QWidget):
         shuffle = soon(icon_button("shuffle", "", None, t.TEXT_2, 18), "aleatorio")
         repeat = soon(icon_button("repeat", "", None, t.TEXT_2, 18), "repetir")
         self._cur = label("00:00", color=t.TEXT_2, size=12, mono=True)
-        self._bar = QProgressBar()
-        self._bar.setTextVisible(False)
-        self._bar.setRange(0, 1000)
+        self._bar = SeekBar()
+        self._bar.seeked.connect(self._seek)
+        self._bar.scrubbed.connect(lambda f: self._cur.setText(fmt_mmss(f * self._dur)))
         self._total = label("--:--", color=t.TEXT_2, size=12, mono=True)
         self._volume = QSlider(Qt.Horizontal)
         self._volume.setRange(0, 100)
@@ -175,7 +260,8 @@ class SongsTab(QWidget):
         obs = button("Archivo OBS", "monitor", "outlineAccent", self._copy_obs, icon_color=t.ACCENT_SOFT,
                      tooltip=f"Copia la ruta de {NOW_PLAYING_FILE.name}: en OBS, añade «Texto (GDI+)» y "
                              "marca «Leer desde archivo».")
-        self._video_btn = icon_button("eye-off", "Mostrar el vídeo (por si YouTube pide aceptar las cookies)",
+        self._video_btn = icon_button("eye-off", "Mostrar el vídeo (solo para verlo; se controla con estos botones. "
+                                      "Si YouTube pide aceptar las cookies, se puede responder ahí)",
                                       self._toggle_video, t.TEXT_2, 17, "iconBox")
         controls = hbox(shuffle, prev, self._play, nxt, repeat, stop, 12, self._cur, self._bar, self._total, 12,
                         icon_label("volume-2", t.TEXT_2, 18), self._volume, self._vol_lbl, 8, obs, self._video_btn,
@@ -317,6 +403,22 @@ class SongsTab(QWidget):
         else:
             self.svc.play()
 
+    def _toggle_favorite(self) -> None:
+        if self._status.current is not None:
+            self.svc.toggle_favorite(self._status.current)
+
+    def _update_favorite(self) -> None:
+        cur = self._status.current
+        self._fav_btn.setVisible(cur is not None)
+        if cur is not None:
+            set_star(self._fav_btn, self.svc.is_favorite(cur.video_id), 22)
+
+    def _seek(self, fraction: float) -> None:
+        if self._dur:
+            pos = fraction * self._dur
+            self.svc.seek(pos)
+            self.set_progress(pos, self._dur)
+
     def _toggle_video(self) -> None:
         showing = self._art.currentIndex() == 1
         self._art.setCurrentIndex(0 if showing else 1)
@@ -376,11 +478,12 @@ class SongsTab(QWidget):
         cur = self._status.current
         eta = (max(0, int(self._dur - self._pos)) if self._dur else cur.duration_s) if cur else 0
         clear_layout(self._queue_list)
+        favorites = {s.video_id for s in repo.backup_list()}
         shown = 0
         for i, s in enumerate(pending, 1):
             if (not query or query in s.title.lower() or query in s.requested_by.lower()) and \
                     (source is None or s.platform is source):
-                self._queue_list.addWidget(QueueRow(self, s, i, eta))
+                self._queue_list.addWidget(QueueRow(self, s, i, eta, s.video_id in favorites))
                 shown += 1
             eta += s.duration_s
         self._queue_empty.setVisible(shown == 0)
@@ -402,9 +505,11 @@ class SongsTab(QWidget):
             self._bl_list.addWidget(MiniRow(e.kind[:2].upper(), e.value, BLACKLIST_KINDS[e.kind], [
                 icon_button("trash-2", "Quitar", lambda _=False, x=e: repo.blacklist_remove(x.id), t.TEXT_3, 14),
             ]))
+        self._update_favorite()
 
     def _on_status(self, st: SongStatus) -> None:
         self._status = st
+        self._update_favorite()
         s = st.current
         enabled = self.svc.config.enabled
         self._req_btn.setText(f"Peticiones: {'ACTIVO' if enabled else 'CERRADO'}")
@@ -446,9 +551,11 @@ class SongsTab(QWidget):
 
     def set_progress(self, pos: float, dur: float) -> None:
         self._pos, self._dur = pos, dur
-        self._cur.setText(fmt_mmss(pos))
+        if not self._bar.dragging:
+            self._cur.setText(fmt_mmss(pos))
         self._total.setText(fmt_mmss(dur) if dur else "--:--")
-        self._bar.setValue(int(1000 * pos / dur) if dur else 0)
+        self._bar.set_seekable(dur > 0)
+        self._bar.set_value(pos / dur if dur else 0)
 
 
 class RequestDialog(ModalDialog):

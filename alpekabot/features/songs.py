@@ -101,6 +101,7 @@ class Player(Protocol):
     def resume(self) -> None: ...
     def stop(self) -> None: ...
     def set_volume(self, volume: int) -> None: ...
+    def seek(self, seconds: float) -> None: ...
 
 
 # ------------------------------------------------------------- repositorio
@@ -419,6 +420,11 @@ class SongService:
             self.repo.queue_set_playing(self._current.id, False)
         self._set_current(None)
 
+    def seek(self, seconds: float) -> None:
+        """Salta a ese segundo de la canción actual."""
+        if self._current is not None and self._player:
+            self._player.seek(max(0.0, float(seconds)))
+
     def set_volume(self, volume: int) -> int:
         volume = max(0, min(100, int(volume)))
         self.config.volume = volume
@@ -470,9 +476,33 @@ class SongService:
             self.repo.queue_remove(song_id)
 
     def remove_backup(self, song_id: int) -> None:
-        self.repo.backup_remove(song_id)
+        self._drop_from_backup(song_id)
         if self._current is not None and self._from_backup and self._current.id == song_id:
             self._advance()
+
+    def _drop_from_backup(self, song_id: int) -> None:
+        """La quita del respaldo sin que la lista, al encogerse, se salte la canción siguiente."""
+        ids = [s.id for s in self.repo.backup_list()]
+        if song_id in ids:
+            upcoming = self._backup_index % len(ids)
+            self._backup_index = upcoming - 1 if ids.index(song_id) < upcoming else upcoming
+        self.repo.backup_remove(song_id)
+
+    # -------------------------------------------------------------- favoritos
+    def is_favorite(self, video_id: str) -> bool:
+        return any(s.video_id == video_id for s in self.repo.backup_list())
+
+    def toggle_favorite(self, song: Song) -> bool:
+        """Pasa la canción al respaldo o la quita de él; devuelve si queda como favorita.
+
+        Nunca salta lo que suena: si era la canción actual, termina con normalidad.
+        """
+        entry = next((s for s in self.repo.backup_list() if s.video_id == song.video_id), None)
+        if entry is not None:
+            self._drop_from_backup(entry.id)
+            return False
+        self.repo.backup_add(VideoInfo(song.video_id, song.title, song.channel, "", song.duration_s))
+        return True
 
     # -------------------------------------------------------------- peticiones
     def _reject_reason(self, info: VideoInfo, is_owner: bool) -> str | None:

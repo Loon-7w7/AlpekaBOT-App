@@ -50,6 +50,66 @@ class FakePlayer:
     def resume(self): self.calls.append(("resume",))
     def stop(self): self.calls.append(("stop",))
     def set_volume(self, v): self.calls.append(("volume", v))
+    def seek(self, s): self.calls.append(("seek", s))
+
+
+# ------------------------------------------------------------ favoritos y adelantar
+def test_favorito_pasa_la_peticion_al_respaldo_y_sigue_en_la_cola(svc, yt):
+    a = yt.add(video(1))
+    run(svc.request(msg("!sr", user="ana", user_id="1"), link(a)))
+    current = svc.status.current
+    assert svc.is_favorite(a.video_id) is False
+    assert svc.toggle_favorite(current) is True
+    assert svc.is_favorite(a.video_id) is True
+    fav = svc.repo.backup_list()[0]
+    assert (fav.video_id, fav.title, fav.channel, fav.duration_s) == \
+        (a.video_id, a.title, a.channel, a.duration_s)
+    assert svc.status.current == current
+    assert [s.video_id for s in svc.repo.queue_list()] == [a.video_id]
+
+
+def test_quitar_favorito_de_la_que_suena_no_la_salta(svc, player):
+    a, b = video(1), video(2)
+    svc.repo.backup_add(a)
+    svc.repo.backup_add(b)
+    svc.play()
+    current = svc.status.current
+    assert current.video_id == a.video_id
+    player.calls.clear()
+    assert svc.toggle_favorite(current) is False
+    assert svc.status.current == current
+    assert player.calls == []
+    assert [s.video_id for s in svc.repo.backup_list()] == [b.video_id]
+
+
+def test_quitar_favorito_no_se_salta_la_siguiente_del_respaldo(svc):
+    a, b, c = video(1), video(2), video(3)
+    for v in (a, b, c):
+        svc.repo.backup_add(v)
+    svc.play()
+    svc.toggle_favorite(svc.status.current)  # quita «a» mientras suena
+    svc._on_ended(a.video_id)
+    assert svc.status.current.video_id == b.video_id
+
+
+def test_la_papelera_del_respaldo_no_se_salta_la_siguiente(svc):
+    a, b, c = video(1), video(2), video(3)
+    for v in (a, b, c):
+        svc.repo.backup_add(v)
+    svc.play()
+    svc.remove_backup(svc.status.current.id)  # esta sí salta: pasa a la siguiente, no a la otra
+    assert svc.status.current.video_id == b.video_id
+
+
+def test_adelantar_solo_con_cancion_sonando(svc, yt, player):
+    svc.seek(30)
+    assert ("seek", 30.0) not in player.calls
+    a = yt.add(video(1))
+    run(svc.request(msg("!sr", user="ana", user_id="1"), link(a)))
+    svc.seek(42.5)
+    svc.seek(-3)
+    assert ("seek", 42.5) in player.calls
+    assert ("seek", 0.0) in player.calls
 
 
 @pytest.fixture

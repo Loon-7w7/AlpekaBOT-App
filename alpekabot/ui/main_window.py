@@ -409,8 +409,8 @@ class MainWindow(QMainWindow):
             self.songs_page.set_progress(0, 0)
 
     def _poll_progress(self) -> None:
-        st = self.bot.songs.status
-        if st.current is not None and not st.paused:
+        # También en pausa: se puede adelantar sin reanudar y la barra inferior debe enterarse
+        if self.bot.songs.status.current is not None:
             self.player.query_progress(self._on_progress)
 
     def _on_progress(self, pos: float, dur: float) -> None:
