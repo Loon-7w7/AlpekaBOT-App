@@ -33,7 +33,6 @@ class EventBus(QObject):
     # Fase 7: ChannelEvent (canje, follow, sub, bits, raid...) / reacciones / estado de VTube Studio
     channel_event = Signal(object)
     reactions_changed = Signal()
-    rewards_changed = Signal()
     vts_status = Signal(object)
     # TTS: cambió la cola, el mensaje que suena o el último error
     tts_changed = Signal()

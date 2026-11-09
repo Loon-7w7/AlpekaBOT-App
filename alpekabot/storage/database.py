@@ -121,6 +121,15 @@ _MIGRATIONS: list[str] = [
         PRIMARY KEY (platform, reward_id)
     );
     """,
+    # v5 — una reacción de canje puede tener un premio por plataforma
+    """
+    ALTER TABLE reactions ADD COLUMN rewards TEXT NOT NULL DEFAULT '[]';
+    UPDATE reactions
+       SET rewards = json_array(json_object('platform', platforms, 'id', reward_id, 'title', reward_title))
+     WHERE trigger = 'reward' AND reward_id != '';
+    ALTER TABLE reactions DROP COLUMN reward_id;
+    ALTER TABLE reactions DROP COLUMN reward_title;
+    """,
 ]
 
 

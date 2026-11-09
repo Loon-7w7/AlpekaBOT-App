@@ -80,15 +80,30 @@ def _secs(value: float) -> str:
 
 
 @dataclass(frozen=True)
+class RewardLink:
+    """El premio que dispara una reacción de canje en una plataforma."""
+
+    platform: Platform
+    id: str
+    title: str = ""
+
+    def to_dict(self) -> dict:
+        return {"platform": self.platform.value, "id": self.id, "title": self.title}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "RewardLink":
+        return cls(Platform(d["platform"]), str(d["id"]), str(d.get("title", "")))
+
+
+@dataclass(frozen=True)
 class Reaction:
     name: str
     trigger: EventKind
     steps: tuple[Step, ...] = ()
     message: str = ""
     cooldown_s: int = 0
-    platforms: frozenset[Platform] = ALL_PLATFORMS
-    reward_id: str = ""        # solo canjes: premio concreto (de UNA plataforma)
-    reward_title: str = ""
+    platforms: frozenset[Platform] = ALL_PLATFORMS  # en los canjes se deduce de ``rewards``
+    rewards: tuple[RewardLink, ...] = ()            # solo canjes: como máximo uno por plataforma
     min_amount: int = 0        # bits/kicks, nº de subs regaladas, espectadores del raid
     enabled: bool = True
     id: int | None = None
@@ -97,7 +112,7 @@ class Reaction:
         if not self.enabled or ev.kind is not self.trigger or ev.platform not in self.platforms:
             return False
         if self.trigger is EventKind.REWARD:
-            return bool(self.reward_id) and ev.reward_id == self.reward_id
+            return any(link.platform is ev.platform and link.id == ev.reward_id for link in self.rewards)
         return ev.amount >= self.min_amount
 
 
@@ -113,11 +128,14 @@ class ReactionRepository:
             steps = tuple(Step.from_dict(d) for d in json.loads(r["steps"]) if isinstance(d, dict))
         except (ValueError, TypeError):
             steps = ()
+        try:
+            rewards = tuple(RewardLink.from_dict(d) for d in json.loads(r["rewards"]))
+        except (ValueError, TypeError, KeyError):
+            rewards = ()
         return Reaction(
             id=r["id"], name=r["name"], trigger=EventKind(r["trigger"]), steps=steps, message=r["message"],
             cooldown_s=r["cooldown_s"], platforms=platforms_from_str(r["platforms"]),
-            reward_id=r["reward_id"], reward_title=r["reward_title"], min_amount=r["min_amount"],
-            enabled=bool(r["enabled"]),
+            rewards=rewards, min_amount=r["min_amount"], enabled=bool(r["enabled"]),
         )
 
     def list_all(self) -> list[Reaction]:
@@ -125,8 +143,9 @@ class ReactionRepository:
         return [self._from_row(r) for r in rows]
 
     def _values(self, r: Reaction) -> tuple:
-        return (r.name.strip(), r.trigger.value, r.reward_id, r.reward_title, max(0, int(r.min_amount)),
-                platforms_to_str(r.platforms), json.dumps([s.to_dict() for s in r.steps], ensure_ascii=False),
+        return (r.name.strip(), r.trigger.value, json.dumps([x.to_dict() for x in r.rewards], ensure_ascii=False),
+                max(0, int(r.min_amount)), platforms_to_str(r.platforms),
+                json.dumps([s.to_dict() for s in r.steps], ensure_ascii=False),
                 r.message.strip(), int(r.cooldown_s), int(r.enabled))
 
     def add(self, r: Reaction) -> Reaction:
@@ -135,8 +154,8 @@ class ReactionRepository:
         try:
             with self._db.conn:
                 cur = self._db.conn.execute(
-                    "INSERT INTO reactions (name, trigger, reward_id, reward_title, min_amount, platforms, steps,"
-                    " message, cooldown_s, enabled, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO reactions (name, trigger, rewards, min_amount, platforms, steps,"
+                    " message, cooldown_s, enabled, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                     (*self._values(r), now, now),
                 )
         except sqlite3.IntegrityError:
@@ -151,7 +170,7 @@ class ReactionRepository:
         try:
             with self._db.conn:
                 self._db.conn.execute(
-                    "UPDATE reactions SET name=?, trigger=?, reward_id=?, reward_title=?, min_amount=?, platforms=?,"
+                    "UPDATE reactions SET name=?, trigger=?, rewards=?, min_amount=?, platforms=?,"
                     " steps=?, message=?, cooldown_s=?, enabled=?, updated_at=? WHERE id=?",
                     (*self._values(r), utc_now_iso(), r.id),
                 )
@@ -169,13 +188,18 @@ class ReactionRepository:
         name = r.name.strip()
         if not name or len(name) > MAX_NAME_LEN:
             raise ValueError(f"El nombre es obligatorio (máx. {MAX_NAME_LEN} caracteres).")
+        if r.trigger is EventKind.REWARD:
+            if not r.rewards or not all(link.id for link in r.rewards):
+                raise ValueError("Elige al menos un premio que dispare la reacción.")
+            if len({link.platform for link in r.rewards}) != len(r.rewards):
+                raise ValueError("Elige como máximo un premio por plataforma.")
+            order = list(Platform)
+            links = sorted(r.rewards, key=lambda link: order.index(link.platform))
+            r = replace(r, rewards=tuple(links), platforms=frozenset(link.platform for link in links))
+        else:
+            r = replace(r, rewards=())
         if not r.platforms:
             raise ValueError("Elige al menos una plataforma.")
-        if r.trigger is EventKind.REWARD:
-            if not r.reward_id:
-                raise ValueError("Elige el premio que dispara la reacción.")
-            if len(r.platforms) != 1:
-                raise ValueError("Un premio pertenece a una sola plataforma.")
         if r.trigger is EventKind.RAID and Platform.TWITCH not in r.platforms:
             raise ValueError("Los raids solo existen en Twitch.")
         if not r.steps and not r.message.strip():
@@ -204,13 +228,11 @@ class ReactionRepository:
                 "INSERT OR REPLACE INTO managed_rewards (platform, reward_id, title, created_at) VALUES (?,?,?,?)",
                 (platform.value, reward_id, title, utc_now_iso()),
             )
-        self._bus.rewards_changed.emit()
 
     def remove_managed_reward(self, platform: Platform, reward_id: str) -> None:
         with self._db.conn:
             self._db.conn.execute("DELETE FROM managed_rewards WHERE platform = ? AND reward_id = ?",
                                   (platform.value, reward_id))
-        self._bus.rewards_changed.emit()
 
     def is_managed(self, platform: Platform, reward_id: str) -> bool:
         row = self._db.conn.execute("SELECT 1 FROM managed_rewards WHERE platform = ? AND reward_id = ?",
@@ -311,9 +333,10 @@ class ReactionService:
 
     def test(self, r: Reaction) -> None:
         """Prueba una reacción desde la app (sin cooldown y sin mensaje al chat)."""
-        platform = next(iter(r.platforms), Platform.TWITCH)
+        link = r.rewards[0] if r.rewards else None
+        platform = link.platform if link else next(iter(r.platforms), Platform.TWITCH)
         ev = ChannelEvent(platform, r.trigger, user_name="AlpekaBOT", amount=max(1, r.min_amount),
-                          reward_id=r.reward_id, reward_title=r.reward_title)
+                          reward_id=link.id if link else "", reward_title=link.title if link else "")
         self._enqueue(_Job(r, ev, test=True))
 
     def _enqueue(self, job: _Job) -> bool:

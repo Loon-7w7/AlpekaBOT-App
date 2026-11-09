@@ -1,13 +1,14 @@
-"""Página «VTube Studio» (sin pantalla): estado, editor de reacciones y premios."""
+"""Página «VTube Studio» (sin pantalla): estado, reacciones y su editor, con los premios."""
 
 import asyncio
 
 import pytest
+from PySide6.QtWidgets import QLabel
 
 from alpekabot.bot import AlpekaBot
 from alpekabot.config import AppConfig
 from alpekabot.core.models import ConnectionState, EventKind, Platform, Reward
-from alpekabot.features.reactions import EXPRESSION, HOTKEY, WAIT, Reaction, Step
+from alpekabot.features.reactions import EXPRESSION, HOTKEY, WAIT, Reaction, RewardLink, Step
 from alpekabot.integrations.vtube_studio import Expression, Hotkey, VTSError, VTSState, VTSStatus
 from alpekabot.platforms.base import PlatformError
 from alpekabot.ui.vtube_tab import ReactionDialog, RewardDialog, VTubeTab, steps_text, trigger_text
@@ -108,7 +109,9 @@ def run(coro):
 
 # -------------------------------------------------------------------- textos
 def test_textos():
-    assert trigger_text(Reaction("a", EventKind.REWARD, reward_title="Saludo")) == "Canje de «Saludo»"
+    tw, kk = RewardLink(Platform.TWITCH, "t", "Saludo"), RewardLink(Platform.KICK, "k", "Hola")
+    assert trigger_text(Reaction("a", EventKind.REWARD, rewards=(tw,))) == "Canje de «Saludo»"
+    assert trigger_text(Reaction("a", EventKind.REWARD, rewards=(tw, kk))) == "Canje: Twitch «Saludo» · Kick «Hola»"
     assert trigger_text(Reaction("a", EventKind.GIFT, min_amount=5)) == "Subs regaladas: 5 o más"
     assert trigger_text(Reaction("a", EventKind.GIFT)) == "Subs regaladas"
     assert trigger_text(Reaction("a", EventKind.FOLLOW)) == "Follow"
@@ -248,12 +251,123 @@ def test_premio_decide_la_plataforma(bot):
         await settle()
         assert dlg._platforms_box.isHidden() and not dlg._reward_box.isHidden()
         dlg.name.setText("Canje")
-        dlg.reward.setCurrentIndex(dlg.reward.findData("k1"))
+        dlg.pickers[Platform.KICK].select("k1")
         dlg.new_step(WAIT)
         dlg.save()
         got = bot.reactions.repo.list_all()[0]
-        assert got.reward_id == "k1" and got.reward_title == "En Kick"
+        assert got.rewards == (RewardLink(Platform.KICK, "k1", "En Kick"),)
         assert got.platforms == frozenset({Platform.KICK})
+    run(main())
+
+
+def test_canje_con_un_premio_en_cada_plataforma(bot):
+    bot.platforms[Platform.KICK] = FakePlatform(Platform.KICK, [Reward(Platform.KICK, "k1", "En Kick", 50)])
+
+    async def main():
+        dlg = ReactionDialog(bot, None)
+        await settle()
+        dlg.name.setText("Canje")
+        dlg.pickers[Platform.TWITCH].select("r1")
+        dlg.pickers[Platform.KICK].select("k1")
+        dlg.new_step(WAIT)
+        dlg.save()
+        saved = bot.reactions.repo.list_all()[0]
+        assert saved.rewards == (RewardLink(Platform.TWITCH, "r1", "Saludo"), RewardLink(Platform.KICK, "k1", "En Kick"))
+        assert saved.platforms == frozenset(Platform)
+
+        # Al editarla se recuperan los dos, y quitar uno deja solo la otra plataforma
+        again = ReactionDialog(bot, saved)
+        await settle()
+        assert again.value() == saved
+        again.pickers[Platform.TWITCH].select("")
+        again.save()
+        got = bot.reactions.repo.list_all()[0]
+        assert got.rewards == (RewardLink(Platform.KICK, "k1", "En Kick"),)
+        assert got.platforms == frozenset({Platform.KICK})
+    run(main())
+
+
+def test_el_panel_no_muestra_premios(bot):
+    async def main():
+        page = VTubeTab(bot)
+        page.show()
+        await settle()
+        assert not hasattr(page, "_rewards") and not hasattr(page, "rewards")
+        assert all(lbl.text() != "Premios de puntos de canal" for lbl in page.findChildren(QLabel))
+        page.hide()
+    run(main())
+
+
+def test_crear_premio_desde_el_editor_lo_selecciona(bot):
+    async def main():
+        dlg = ReactionDialog(bot, None)
+        await settle()
+        picker = dlg.pickers[Platform.TWITCH]
+        assert picker.delete_button.isHidden()
+        rd = dlg.open_reward_dialog(Platform.TWITCH)
+        assert rd.platform is Platform.TWITCH
+        await rd.submit()
+        assert "título" in rd.error.text()
+        rd.title_edit.setText("Baile")
+        rd.cost.setValue(500)
+        rd.prompt.setText("Baila")
+        await rd.submit()
+        assert bot.platforms[Platform.TWITCH].created == [("Baile", 500, "Baila")]
+        assert bot.reactions.repo.is_managed(Platform.TWITCH, "id-Baile")
+        assert picker.selected().id == "id-Baile" and not picker.delete_button.isHidden()
+    run(main())
+
+
+def test_crear_premio_con_error(bot):
+    bot.platforms[Platform.TWITCH].error = PlatformError("Twitch no dejó crear el premio")
+
+    async def main():
+        dlg = RewardDialog(bot, Platform.TWITCH)
+        dlg.title_edit.setText("Baile")
+        await dlg.submit()
+        assert "no dejó" in dlg.error.text() and dlg._create.isEnabled()
+        assert bot.reactions.repo.managed_ids(Platform.TWITCH) == set()
+    run(main())
+
+
+def test_no_se_crean_premios_en_una_plataforma_sin_conectar(bot):
+    async def main():
+        dlg = ReactionDialog(bot, None)
+        await settle()
+        assert dlg.pickers[Platform.TWITCH].create_button.isEnabled()
+        assert not dlg.pickers[Platform.KICK].create_button.isEnabled()
+    run(main())
+
+
+def test_borrar_premio_solo_los_de_la_app(bot):
+    async def main():
+        bot.reactions.repo.add_managed_reward(Platform.TWITCH, "r1", "Saludo")
+        bot.platforms[Platform.TWITCH]._rewards.append(Reward(Platform.TWITCH, "r2", "Ajeno", 5))
+        dlg = ReactionDialog(bot, None)
+        await settle()
+        picker = dlg.pickers[Platform.TWITCH]
+        picker.select("r2")
+        assert picker.delete_button.isHidden()
+        picker.select("r1")
+        assert not picker.delete_button.isHidden()
+        await dlg.delete_reward(picker, picker.selected())
+        assert bot.platforms[Platform.TWITCH].deleted == ["r1"]
+        assert not bot.reactions.repo.is_managed(Platform.TWITCH, "r1")
+        assert picker.selected() is None and picker.combo.findData("r1") == -1
+    run(main())
+
+
+def test_borrar_premio_con_error_lo_mantiene(bot):
+    async def main():
+        bot.reactions.repo.add_managed_reward(Platform.TWITCH, "r1", "Saludo")
+        dlg = ReactionDialog(bot, None)
+        await settle()
+        picker = dlg.pickers[Platform.TWITCH]
+        picker.select("r1")
+        bot.platforms[Platform.TWITCH].error = PlatformError("Twitch dijo que no")
+        await dlg.delete_reward(picker, picker.selected())
+        assert "dijo que no" in dlg._reward_hint.text() and picker.selected().id == "r1"
+        assert bot.reactions.repo.is_managed(Platform.TWITCH, "r1")
     run(main())
 
 
@@ -273,7 +387,7 @@ def test_sin_premio_muestra_el_error_de_premio(bot):
 def test_premio_guardado_se_conserva_si_no_se_puede_listar(bot):
     bot.platforms[Platform.TWITCH] = FakePlatform(Platform.TWITCH, connected=False)
     saved = bot.reactions.repo.add(Reaction("Canje", EventKind.REWARD, (Step(WAIT, seconds=1),), platforms=TW,
-                                            reward_id="r9", reward_title="Viejo"))
+                                            rewards=(RewardLink(Platform.TWITCH, "r9", "Viejo"),)))
 
     async def main():
         dlg = ReactionDialog(bot, saved)
@@ -424,93 +538,4 @@ def test_cerrar_el_editor_cancela_sus_tareas(bot):
         dlg.reject()
         await settle()
         assert all(task.done() for task in tasks)
-    run(main())
-
-
-# -------------------------------------------------------------------- premios
-def test_lista_de_premios_marca_los_de_la_app(bot):
-    async def main():
-        bot.reactions.repo.add_managed_reward(Platform.TWITCH, "r1", "Saludo")
-        page = VTubeTab(bot)
-        await page._load_rewards()
-        assert [r.managed for r in page.rewards] == [True]
-        assert page._rewards.count() == 1 and page.new_reward_button.isEnabled()
-    run(main())
-
-
-def test_premios_sin_conexion(bot):
-    bot.platforms[Platform.TWITCH].is_connected = False
-
-    async def main():
-        page = VTubeTab(bot)
-        await page._load_rewards()
-        assert "Conecta" in page.rewards_message.text() and not page.new_reward_button.isEnabled()
-    run(main())
-
-
-def test_error_de_premios_se_muestra(bot):
-    bot.platforms[Platform.TWITCH].error = PlatformError("hace falta ser afiliado")
-
-    async def main():
-        page = VTubeTab(bot)
-        await page._load_rewards()
-        assert "afiliado" in page.rewards_message.text()
-    run(main())
-
-
-def test_crear_premio(bot):
-    async def main():
-        page = VTubeTab(bot)
-        dlg = RewardDialog(bot, page)
-        assert dlg.platform.value() == Platform.TWITCH.value  # Kick no está conectado
-        await dlg.submit()
-        assert "título" in dlg.error.text()
-        dlg.title_edit.setText("Baile")
-        dlg.cost.setValue(500)
-        dlg.prompt.setText("Baila")
-        await dlg.submit()
-        assert bot.platforms[Platform.TWITCH].created == [("Baile", 500, "Baila")]
-        assert bot.reactions.repo.is_managed(Platform.TWITCH, "id-Baile")
-        await settle()
-        assert any(r.id == "id-Baile" and r.managed for r in page.rewards)
-    run(main())
-
-
-def test_crear_premio_con_error(bot):
-    bot.platforms[Platform.TWITCH].error = PlatformError("Twitch no dejó crear el premio")
-
-    async def main():
-        dlg = RewardDialog(bot)
-        dlg.title_edit.setText("Baile")
-        await dlg.submit()
-        assert "no dejó" in dlg.error.text() and dlg._create.isEnabled()
-        assert bot.reactions.repo.managed_ids(Platform.TWITCH) == set()
-    run(main())
-
-
-def test_borrar_premio(bot):
-    async def main():
-        bot.reactions.repo.add_managed_reward(Platform.TWITCH, "r1", "Saludo")
-        page = VTubeTab(bot)
-        await page._delete_reward(Reward(Platform.TWITCH, "r1", "Saludo", 100, True))
-        assert bot.platforms[Platform.TWITCH].deleted == ["r1"]
-        assert not bot.reactions.repo.is_managed(Platform.TWITCH, "r1")
-    run(main())
-
-
-def test_premios_se_recargan_al_mostrar_tras_conectar(bot):
-    async def main():
-        page = VTubeTab(bot)
-        page.show()
-        await settle()
-        assert len(page.rewards) == 1
-        bot.platforms[Platform.TWITCH]._rewards.append(Reward(Platform.TWITCH, "r2", "Otro", 5))
-        page.hide()
-        bot.bus.connection_state.emit(Platform.TWITCH, ConnectionState.CONNECTED, "")
-        await settle()
-        assert len(page.rewards) == 1  # oculta: no pide nada todavía
-        page.show()
-        await settle()
-        assert len(page.rewards) == 2
-        page.hide()
     run(main())

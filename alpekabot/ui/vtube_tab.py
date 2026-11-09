@@ -1,4 +1,4 @@
-"""Página «VTube Studio»: conexión, reacciones del avatar y premios de puntos de canal."""
+"""Página «VTube Studio»: conexión y reacciones del avatar (los premios se gestionan en su editor)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import asyncio
 import logging
 from dataclasses import replace
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -19,14 +19,23 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..core.models import ConnectionState, EventKind, Platform, Reward
-from ..features.reactions import EXPRESSION, HOTKEY, MAX_NAME_LEN, MAX_STEP_S, MAX_STEPS, WAIT, Reaction, Step
+from ..core.models import EventKind, Platform, Reward
+from ..features.reactions import (
+    EXPRESSION,
+    HOTKEY,
+    MAX_NAME_LEN,
+    MAX_STEP_S,
+    MAX_STEPS,
+    WAIT,
+    Reaction,
+    RewardLink,
+    Step,
+)
 from ..integrations.vtube_studio import VTSError, VTSState, VTSStatus
 from ..platforms.base import PlatformError
 from . import theme as t
 from .commands_tab import ElidedLabel, VariablesBar, platform_line, scroll_page
 from .widgets import (
-    ChipGroup,
     Dot,
     ModalDialog,
     Pill,
@@ -67,7 +76,9 @@ PLATFORM_COLORS = {Platform.TWITCH: t.ACCENT_SOFT, Platform.KICK: t.KICK}
 def trigger_text(r: Reaction) -> str:
     """«Canje de «Saludo»», «Subs regaladas: 5 o más», «Follow»…"""
     if r.trigger is EventKind.REWARD:
-        return f"Canje de «{r.reward_title or 'premio'}»"
+        if len(r.rewards) > 1:
+            return "Canje: " + " · ".join(f"{x.platform.label} «{x.title or 'premio'}»" for x in r.rewards)
+        return f"Canje de «{(r.rewards[0].title if r.rewards else '') or 'premio'}»"
     if r.trigger in MIN_AMOUNTS and r.min_amount > 0:
         return f"{r.trigger.label}: {r.min_amount} o más"
     return r.trigger.label
@@ -138,24 +149,6 @@ class ReactionRow(QFrame):
         self.setLayout(lay)
 
 
-class RewardRow(QFrame):
-    def __init__(self, page: "VTubeTab", reward: Reward) -> None:
-        super().__init__()
-        self.setObjectName("row")
-        kind = (Pill("Creado por la app", t.GREEN, size=10) if reward.managed else
-                Pill("Solo escuchar", t.TEXT_3, bg=0.08, border=0.3, size=10))
-        kind.setToolTip("Se puede devolver y borrar desde aquí" if reward.managed else
-                        "Creado fuera de la app: no se pueden devolver sus canjes")
-        title = label(_escape(reward.title), size=14)
-        title.setTextFormat(Qt.RichText)
-        lay = hbox(Pill(reward.platform.label, PLATFORM_COLORS[reward.platform], size=10), title, None,
-                   label(f"{reward.cost} puntos", color=t.TEXT_3, size=12, mono=True), 8, kind,
-                   spacing=10, margins=(16, 10, 12, 10))
-        if reward.managed:
-            lay.addWidget(icon_button("trash-2", "Borrar premio", lambda: page.delete_reward(reward), t.TEXT_2, 16))
-        self.setLayout(lay)
-
-
 # ====================================================================== página
 class VTubeTab(QWidget):
     title = "VTube Studio"
@@ -167,9 +160,6 @@ class VTubeTab(QWidget):
         self.bot = bot
         self.repo = bot.reactions.repo
         self._applying = False
-        self._rewards_loading = False
-        self._rewards_stale = True
-        self.rewards: list[Reward] = []
 
         new = button("Nueva Reacción", "plus", "primary", lambda: self.open_reaction(None))
         self.actions = QWidget()
@@ -211,26 +201,14 @@ class VTubeTab(QWidget):
         self._reactions_empty = label("Todavía no hay reacciones. Crea una con «Nueva Reacción».", color=t.TEXT_3,
                                       size=13)
 
-        # --------------------------------------------------------------- premios
-        rewards_head, self._rewards_count = section_header("star", "Premios de puntos de canal")
-        self.new_reward_button = button("Crear premio", "plus", slot=self.open_reward_dialog)
-        reload_rewards = button("Actualizar", "repeat", slot=self._load_rewards_now)
-        self.rewards_message = label("", color=t.TEXT_3, size=12, wrap=True)
-        self._rewards = vbox(spacing=8)
-
-        rewards_bar = hbox(self.rewards_message, reload_rewards, self.new_reward_button, spacing=10)
-        rewards_bar.setStretchFactor(self.rewards_message, 1)
-        content = vbox(status_card, self.notice, 6, reactions_head, info, self._reactions, self._reactions_empty, 10,
-                       rewards_head, rewards_bar, self._rewards, None, spacing=14, margins=(28, 20, 28, 24))
+        content = vbox(status_card, self.notice, 6, reactions_head, info, self._reactions, self._reactions_empty, None,
+                       spacing=14, margins=(28, 20, 28, 24))
         self.setLayout(vbox(scroll_page(content), spacing=0))
 
         bot.bus.vts_status.connect(self._on_status)
         bot.bus.reactions_changed.connect(self.reload)
-        bot.bus.rewards_changed.connect(self._load_rewards_now)
-        bot.bus.connection_state.connect(self._on_platform_state)
         self._on_status(bot.vtube.status)
         self.reload()
-        self._render_rewards([])
 
     # ------------------------------------------------------------------ estado
     def _on_status(self, st: VTSStatus) -> None:
@@ -314,80 +292,6 @@ class VTubeTab(QWidget):
         self.bot.reactions.test(r)
         self._show_notice(f"Probando «{r.name}»: mira tu avatar. Si no pasa nada, revisa «Consola & Logs».")
 
-    # ----------------------------------------------------------------- premios
-    def showEvent(self, event) -> None:  # noqa: N802 (Qt)
-        super().showEvent(event)
-        if self._rewards_stale:
-            self._load_rewards_now()
-
-    def _on_platform_state(self, _platform, state: ConnectionState, _detail: str) -> None:
-        if state in (ConnectionState.CONNECTED, ConnectionState.DISCONNECTED):
-            self._rewards_stale = True
-            if self.isVisible():
-                self._load_rewards_now()
-
-    def _load_rewards_now(self, *_) -> None:
-        if not self._rewards_loading:
-            self._rewards_stale = False
-            self._rewards_loading = True
-            asyncio.ensure_future(self._load_rewards())
-
-    async def _load_rewards(self) -> None:
-        try:
-            if not self.bot.any_connected:
-                self.rewards = []
-                self._render_rewards([])
-                return
-            self.rewards_message.setText("Cargando premios…")
-            self.rewards, errors = await self.bot.list_rewards()
-            self._render_rewards(errors)
-        except Exception:
-            log.exception("Error cargando los premios")
-            self._render_rewards(["Error inesperado al cargar los premios (mira la consola)."])
-        finally:
-            self._rewards_loading = False
-
-    def _render_rewards(self, errors: list[str]) -> None:
-        clear_layout(self._rewards)
-        for reward in self.rewards:
-            self._rewards.addWidget(RewardRow(self, reward))
-        self._rewards_count.setText(_count(len(self.rewards), "premio", "premios"))
-        connected = self.bot.any_connected
-        self.new_reward_button.setEnabled(connected)
-        self.new_reward_button.setToolTip("" if connected else "Conecta Twitch o Kick primero")
-        msg = self.rewards_message
-        if errors:
-            msg.setStyleSheet(f"font-size: 12px; color: {t.RED};")
-            msg.setText(_escape(" · ".join(errors)))
-            return
-        msg.setStyleSheet(f"font-size: 12px; color: {t.TEXT_3};")
-        if not connected:
-            msg.setText("Conecta Twitch o Kick para ver y crear premios.")
-        elif not self.rewards:
-            msg.setText("Este canal todavía no tiene premios.")
-        else:
-            msg.setText("Solo los premios creados aquí se pueden devolver si VTube Studio está cerrado.")
-
-    def open_reward_dialog(self) -> None:
-        dlg = RewardDialog(self.bot, self)
-        dlg.setAttribute(Qt.WA_DeleteOnClose)
-        dlg.open()
-
-    def delete_reward(self, reward: Reward) -> None:
-        answer = QMessageBox.question(
-            self, "Borrar premio",
-            f"¿Borrar el premio «{reward.title}» de {reward.platform.label}?\n"
-            "Las reacciones que lo usan dejarán de saltar.",
-        )
-        if answer == QMessageBox.Yes:
-            asyncio.ensure_future(self._delete_reward(reward))
-
-    async def _delete_reward(self, reward: Reward) -> None:
-        try:
-            await self.bot.delete_reward(reward.platform, reward.id)
-        except PlatformError as exc:
-            self._render_rewards([str(exc)])
-
 
 # ===================================================================== pasos
 class StepRow(QFrame):
@@ -464,6 +368,72 @@ class StepRow(QFrame):
 
 
 # =================================================================== diálogos
+class RewardPicker(QWidget):
+    """Premio de una plataforma para una reacción de canje, con crear y borrar."""
+
+    def __init__(self, dialog: "ReactionDialog", platform: Platform, link: RewardLink | None) -> None:
+        super().__init__()
+        self.platform = platform
+        self.rewards: dict[str, Reward] = {}
+        self._connected = False
+        self.combo = QComboBox()
+        self.combo.addItem(f"Sin premio en {platform.label}", "")
+        self.combo.currentIndexChanged.connect(self._sync)
+        self.create_button = icon_button("plus", "", lambda: dialog.open_reward_dialog(platform), t.TEXT, 16, "iconBox")
+        self.delete_button = icon_button("trash-2", f"Borrar este premio de {platform.label}",
+                                         lambda: dialog.confirm_delete_reward(self), t.TEXT_2, 16, "iconBox")
+        policy = self.delete_button.sizePolicy()
+        policy.setRetainSizeWhenHidden(True)  # así los selectores de las dos plataformas quedan alineados
+        self.delete_button.setSizePolicy(policy)
+        badge = Pill(platform.label, PLATFORM_COLORS[platform], size=10)
+        badge.setFixedWidth(64)
+        lay = hbox(badge, self.combo, self.create_button, self.delete_button, spacing=8)
+        lay.setStretchFactor(self.combo, 1)
+        self.setLayout(lay)
+        if link:
+            self.add(Reward(platform, link.id, link.title, managed=dialog._repo.is_managed(platform, link.id)))
+            self.select(link.id)
+        self.set_connected(dialog._bot.platforms[platform].is_connected)
+
+    def add(self, reward: Reward) -> None:
+        text = reward.title + (f" ({reward.cost} puntos)" if reward.cost else "")
+        index = self.combo.findData(reward.id)
+        self.rewards[reward.id] = reward
+        if index >= 0:
+            self.combo.setItemText(index, text)
+        else:
+            self.combo.addItem(text, reward.id)
+        self._sync()
+
+    def remove(self, reward_id: str) -> None:
+        self.rewards.pop(reward_id, None)
+        index = self.combo.findData(reward_id)
+        if index >= 0:
+            if self.combo.currentIndex() == index:
+                self.combo.setCurrentIndex(0)  # si no, Qt elegiría solo el premio de al lado
+            self.combo.removeItem(index)
+
+    def select(self, reward_id: str) -> None:
+        index = self.combo.findData(reward_id)
+        if index >= 0:
+            self.combo.setCurrentIndex(index)
+
+    def selected(self) -> Reward | None:
+        return self.rewards.get(self.combo.currentData() or "")
+
+    def set_connected(self, connected: bool) -> None:
+        self._connected = connected
+        self.create_button.setEnabled(connected)
+        self.create_button.setToolTip(f"Crear un premio en {self.platform.label}" if connected
+                                      else f"Conecta {self.platform.label} para crear premios")
+        self._sync()
+
+    def _sync(self, *_) -> None:
+        reward = self.selected()
+        self.delete_button.setVisible(bool(reward and reward.managed))  # solo se pueden borrar los de la app
+        self.delete_button.setEnabled(self._connected)
+
+
 class _AsyncDialog(ModalDialog):
     """Modal cuyas tareas en segundo plano se cancelan al cerrarlo (sus widgets dejan de existir)."""
 
@@ -491,7 +461,6 @@ class ReactionDialog(_AsyncDialog):
         self._repo = bot.reactions.repo
         self._reaction = reaction
         x = reaction or Reaction(name="", trigger=EventKind.REWARD)
-        self._rewards: dict[str, Reward] = {}
         self.rows: list[StepRow] = []
         self._hotkeys: list[tuple[str, str]] = []
         self._expressions: list[tuple[str, str]] = []
@@ -510,19 +479,17 @@ class ReactionDialog(_AsyncDialog):
         self.trigger.currentIndexChanged.connect(self._sync_trigger)
         form.addLayout(vbox(self.field_label("Cuándo salta", True), self.trigger, spacing=6))
 
-        # premio (solo canjes)
-        self.reward = QComboBox()
+        # premios (solo canjes): uno por plataforma, como mínimo uno
+        links = {link.platform: link for link in x.rewards}
+        self.pickers = {p: RewardPicker(self, p, links.get(p)) for p in Platform}
         self._reward_hint = label("", color=t.TEXT_3, size=12, wrap=True)
         reload_rewards = icon_button("repeat", "Volver a cargar los premios",
                                      lambda: self.spawn(self.load_rewards()), t.TEXT_2, 16, "iconBox")
+        hint_row = hbox(self._reward_hint, reload_rewards, spacing=8)
+        hint_row.setStretchFactor(self._reward_hint, 1)
         self._reward_box = QWidget()
-        self._reward_box.setLayout(vbox(self.field_label("Premio", True), hbox(self.reward, reload_rewards, spacing=8),
-                                        self._reward_hint, spacing=6))
-        self.reward.setSizePolicy(self.name.sizePolicy())
+        self._reward_box.setLayout(vbox(self.field_label("Premios", True), *self.pickers.values(), hint_row, spacing=6))
         form.addWidget(self._reward_box)
-        if x.reward_id:
-            self._add_reward(Reward(next(iter(x.platforms)), x.reward_id, x.reward_title))
-            self.reward.setCurrentIndex(0)
 
         # cantidad mínima
         self.min_amount = QSpinBox()
@@ -603,7 +570,7 @@ class ReactionDialog(_AsyncDialog):
     def _sync_trigger(self, *_) -> None:
         kind = self._kind()
         self._reward_box.setVisible(kind is EventKind.REWARD)
-        # Un premio ya decide su plataforma; los raids solo existen en Twitch
+        # Los premios elegidos ya deciden las plataformas; los raids solo existen en Twitch
         self._platforms_box.setVisible(kind not in (EventKind.REWARD, EventKind.RAID))
         self._min_box.setVisible(kind in MIN_AMOUNTS)
         if kind in MIN_AMOUNTS:
@@ -611,16 +578,9 @@ class ReactionDialog(_AsyncDialog):
             self._min_label.setText(text)
             self.min_amount.setSuffix(suffix)
 
-    def _add_reward(self, reward: Reward) -> None:
-        text = f"{reward.platform.label} · {reward.title}" + (f" ({reward.cost} puntos)" if reward.cost else "")
-        index = self.reward.findData(reward.id)
-        if index >= 0:
-            self.reward.setItemText(index, text)
-        else:
-            self.reward.addItem(text, reward.id)
-        self._rewards[reward.id] = reward
-
     async def load_rewards(self) -> None:
+        for picker in self.pickers.values():
+            picker.set_connected(self._bot.platforms[picker.platform].is_connected)
         if not self._bot.any_connected:
             self._reward_hint.setText("Conecta Twitch o Kick para ver sus premios.")
             return
@@ -631,13 +591,45 @@ class ReactionDialog(_AsyncDialog):
             log.exception("Error cargando los premios")
             rewards, errors = [], ["Error inesperado al cargar los premios (mira la consola)."]
         for reward in rewards:
-            self._add_reward(reward)
+            self.pickers[reward.platform].add(reward)
         if errors:
             self._reward_hint.setText(_escape(" · ".join(errors)))
-        elif not self._rewards:
-            self._reward_hint.setText("No hay premios. Crea uno en la sección de premios de esta página.")
+        elif not any(picker.rewards for picker in self.pickers.values()):
+            self._reward_hint.setText("Todavía no hay premios: crea uno con el botón +.")
         else:
             self._reward_hint.setText("Los premios creados por la app devuelven los puntos si VTube Studio está cerrado.")
+
+    def open_reward_dialog(self, platform: Platform) -> "RewardDialog":
+        dlg = RewardDialog(self._bot, platform, self)
+        dlg.setAttribute(Qt.WA_DeleteOnClose)
+        dlg.created.connect(self._on_reward_created)
+        dlg.open()
+        return dlg
+
+    def _on_reward_created(self, reward: Reward) -> None:
+        picker = self.pickers[reward.platform]
+        picker.add(replace(reward, managed=True))
+        picker.select(reward.id)
+
+    def confirm_delete_reward(self, picker: RewardPicker) -> None:
+        reward = picker.selected()
+        if reward is None:
+            return
+        answer = QMessageBox.question(
+            self, "Borrar premio",
+            f"¿Borrar el premio «{reward.title}» de {reward.platform.label}?\n"
+            "Las reacciones que lo usan dejarán de saltar en esa plataforma.",
+        )
+        if answer == QMessageBox.Yes:
+            self.spawn(self.delete_reward(picker, reward))
+
+    async def delete_reward(self, picker: RewardPicker, reward: Reward) -> None:
+        try:
+            await self._bot.delete_reward(reward.platform, reward.id)
+        except PlatformError as exc:
+            self._reward_hint.setText(_escape(str(exc)))
+            return
+        picker.remove(reward.id)
 
     # ----------------------------------------------------------------- pasos
     async def load_avatar(self) -> None:
@@ -708,9 +700,11 @@ class ReactionDialog(_AsyncDialog):
     # --------------------------------------------------------------- guardado
     def value(self) -> Reaction:
         kind = self._kind()
-        reward = self._rewards.get(self.reward.currentData() or "") if kind is EventKind.REWARD else None
+        links: tuple[RewardLink, ...] = ()
         if kind is EventKind.REWARD:
-            platforms = frozenset({reward.platform if reward else Platform.TWITCH})
+            chosen = [picker.selected() for picker in self.pickers.values()]
+            links = tuple(RewardLink(r.platform, r.id, r.title) for r in chosen if r)
+            platforms = frozenset(link.platform for link in links)
         elif kind is EventKind.RAID:
             platforms = frozenset({Platform.TWITCH})
         else:
@@ -723,8 +717,7 @@ class ReactionDialog(_AsyncDialog):
             message=self.message.toPlainText().replace("\n", " "),
             cooldown_s=self.cooldown.value(),
             platforms=platforms,
-            reward_id=reward.id if reward else "",
-            reward_title=reward.title if reward else "",
+            rewards=links,
             min_amount=self.min_amount.value() if kind in MIN_AMOUNTS else 0,
             enabled=self.enabled.isChecked(),
         )
@@ -762,15 +755,13 @@ class ReactionDialog(_AsyncDialog):
 
 
 class RewardDialog(_AsyncDialog):
-    def __init__(self, bot, parent=None) -> None:
-        super().__init__("Crear Premio", "Un premio de puntos de canal gestionado por la app: si VTube Studio está "
-                         "cerrado, devuelve los puntos.", "star", parent, width=620)
+    created = Signal(object)  # Reward
+
+    def __init__(self, bot, platform: Platform, parent=None) -> None:
+        super().__init__(f"Crear Premio en {platform.label}", "Un premio de puntos de canal gestionado por la app: si "
+                         "VTube Studio está cerrado, devuelve los puntos.", "star", parent, width=620)
         self._bot = bot
-        connected = [p for p, c in bot.platforms.items() if c.is_connected]
-        self.platform = ChipGroup([(p.label, p.value, None) for p in connected])
-        if connected:
-            self.platform.set_value(connected[0].value)
-        self.body.addLayout(vbox(self.field_label("Plataforma", True), self.platform, spacing=6))
+        self.platform = platform
         self.title_edit = QLineEdit()
         self.title_edit.setMaxLength(MAX_REWARD_TITLE)
         self.title_edit.setPlaceholderText("Saludo del avatar")
@@ -796,17 +787,18 @@ class RewardDialog(_AsyncDialog):
         self.footer.addWidget(self._create)
 
     async def submit(self) -> None:
-        value, title = self.platform.value(), self.title_edit.text().strip()
-        if not value or not title:
-            self.error.setText("Elige una plataforma y escribe un título.")
+        title = self.title_edit.text().strip()
+        if not title:
+            self.error.setText("Escribe un título.")
             self.error.show()
             return
         self._create.setEnabled(False)
         try:
-            await self._bot.create_reward(Platform(value), title, self.cost.value(), self.prompt.text().strip())
+            reward = await self._bot.create_reward(self.platform, title, self.cost.value(), self.prompt.text().strip())
         except PlatformError as exc:
             self.error.setText(_escape(str(exc)))
             self.error.show()
             self._create.setEnabled(True)
             return
+        self.created.emit(reward)
         self.accept()

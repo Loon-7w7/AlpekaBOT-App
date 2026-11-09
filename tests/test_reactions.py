@@ -16,8 +16,10 @@ from alpekabot.features.reactions import (
     Reaction,
     ReactionRepository,
     ReactionService,
+    RewardLink,
     Step,
 )
+from alpekabot.storage import database
 from alpekabot.integrations.vtube_studio import VTSError
 from alpekabot.platforms.base import PlatformError
 
@@ -84,7 +86,8 @@ def redeem(reward="r1", pending=True, redemption="c1", platform=Platform.TWITCH)
 
 
 def reward_reaction(name="Canje", **over):
-    data = dict(name=name, trigger=EventKind.REWARD, steps=(HK,), platforms=TW, reward_id="r1", reward_title="Saludo")
+    data = dict(name=name, trigger=EventKind.REWARD, steps=(HK,), platforms=TW,
+                rewards=(RewardLink(Platform.TWITCH, "r1", "Saludo"),))
     return Reaction(**{**data, **over})
 
 
@@ -107,8 +110,61 @@ def test_canje_solo_de_su_premio_y_desactivada_nunca():
     r = reward_reaction()
     assert r.matches(redeem("r1"))
     assert not r.matches(redeem("otro"))
-    assert not reward_reaction(reward_id="").matches(redeem(""))
+    assert not reward_reaction(rewards=()).matches(redeem(""))
     assert not reward_reaction(enabled=False).matches(redeem("r1"))
+
+
+def test_canje_multiplataforma_salta_con_el_premio_de_cada_una():
+    r = reward_reaction(platforms=frozenset(Platform), rewards=(
+        RewardLink(Platform.TWITCH, "tw1", "Saludo"), RewardLink(Platform.KICK, "kk1", "Hola")))
+    assert r.matches(ChannelEvent(Platform.TWITCH, EventKind.REWARD, reward_id="tw1"))
+    assert r.matches(ChannelEvent(Platform.KICK, EventKind.REWARD, reward_id="kk1"))
+    # El ID de un premio solo vale en su plataforma
+    assert not r.matches(ChannelEvent(Platform.KICK, EventKind.REWARD, reward_id="tw1"))
+    assert not r.matches(ChannelEvent(Platform.TWITCH, EventKind.REWARD, reward_id="kk1"))
+
+
+def test_guardar_canje_multiplataforma_deduce_las_plataformas(h):
+    h.repo.add(reward_reaction(platforms=TW, rewards=(
+        RewardLink(Platform.KICK, "kk1", "Hola"), RewardLink(Platform.TWITCH, "tw1", "Saludo á"))))
+    got = h.repo.list_all()[0]
+    assert got.platforms == frozenset(Platform)
+    assert got.rewards == (RewardLink(Platform.TWITCH, "tw1", "Saludo á"), RewardLink(Platform.KICK, "kk1", "Hola"))
+
+
+def test_reaccion_que_no_es_canje_no_guarda_premios(h):
+    h.repo.add(Reaction("a", EventKind.FOLLOW, (HK,), rewards=(RewardLink(Platform.KICK, "kk1"),)))
+    assert h.repo.list_all()[0].rewards == ()
+
+
+def test_migracion_v5_conserva_las_reacciones(tmp_path):
+    import json
+    import sqlite3
+
+    path = tmp_path / "v4.db"
+    conn = sqlite3.connect(path)
+    for script in database._MIGRATIONS[:4]:
+        conn.executescript(script)
+    conn.execute("PRAGMA user_version = 4")
+    insert = ("INSERT INTO reactions (name, trigger, reward_id, reward_title, platforms, steps, created_at, updated_at)"
+              " VALUES (?,?,?,?,?,?,'t','t')")
+    steps = json.dumps([HK.to_dict()])
+    conn.execute(insert, ("Canje K", "reward", "k1", "Hola «ñ»", "kick", steps))
+    conn.execute(insert, ("Canje T", "reward", "t1", "Saludo", "twitch", steps))
+    conn.execute(insert, ("Follow", "follow", "", "", "kick,twitch", steps))
+    conn.commit()
+    conn.close()
+
+    db = database.Database(path)
+    try:
+        assert db.conn.execute("PRAGMA user_version").fetchone()[0] == len(database._MIGRATIONS)
+        got = {r.name: r for r in ReactionRepository(db, EventBus()).list_all()}
+        assert got["Canje K"].rewards == (RewardLink(Platform.KICK, "k1", "Hola «ñ»"),)
+        assert got["Canje K"].platforms == frozenset({Platform.KICK})
+        assert got["Canje T"].rewards == (RewardLink(Platform.TWITCH, "t1", "Saludo"),)
+        assert got["Follow"].rewards == () and got["Follow"].steps == (HK,)
+    finally:
+        db.close()
 
 
 # --------------------------------------------------------------- repositorio
@@ -131,7 +187,9 @@ def test_guardar_y_leer_conserva_todo(h):
     (Reaction("x" * 41, EventKind.FOLLOW, (HK,)), "nombre"),
     (Reaction("a", EventKind.FOLLOW, (HK,), platforms=frozenset()), "plataforma"),
     (Reaction("a", EventKind.REWARD, (HK,), platforms=TW), "premio"),
-    (Reaction("a", EventKind.REWARD, (HK,), reward_id="r"), "una sola plataforma"),
+    (Reaction("a", EventKind.REWARD, (HK,), platforms=frozenset(), rewards=()), "premio"),
+    (Reaction("a", EventKind.REWARD, (HK,), rewards=(RewardLink(Platform.KICK, "r1"), RewardLink(Platform.KICK, "r2"))),
+     "por plataforma"),
     (Reaction("a", EventKind.RAID, (HK,), platforms=frozenset({Platform.KICK})), "Twitch"),
     (Reaction("a", EventKind.FOLLOW), "al menos un paso"),
     (Reaction("a", EventKind.FOLLOW, (HK,) * (MAX_STEPS + 1)), "Máximo"),
