@@ -341,6 +341,43 @@ def test_skiptts_is_for_mods_only(h):
     asyncio.run(main())
 
 
+def test_unreadable_text_is_skipped_without_error(h):
+    from alpekabot.features.tts import UnreadableText
+    player = FakePlayer()
+    h.svc.attach_player(player)
+    h.fail = UnreadableText()
+
+    async def main():
+        h.svc.start()
+        h.svc.preview("アイドル")
+        await settle()
+        assert h.svc.last_error == ""
+        assert h.svc.current is None
+        h.fail = None
+        h.svc.preview("dos")
+        await settle()
+        assert h.svc.last_error == ""
+        await h.svc.stop()
+
+    asyncio.run(main())
+
+
+def test_edge_synthesize_maps_no_audio_to_unreadable(monkeypatch):
+    import edge_tts
+    from alpekabot.features import tts
+
+    class Boom:
+        def __init__(self, *a, **k): pass
+
+        async def stream(self):
+            raise edge_tts.exceptions.NoAudioReceived("No audio")
+            yield  # pragma: no cover
+
+    monkeypatch.setattr(tts.edge_tts, "Communicate", Boom)
+    with pytest.raises(tts.UnreadableText):
+        asyncio.run(tts.edge_synthesize("アイドル", "es-MX-JorgeNeural", 0))
+
+
 def test_synth_failure_is_reported_and_queue_continues(h):
     player = FakePlayer()
     h.svc.attach_player(player)

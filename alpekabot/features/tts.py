@@ -67,10 +67,19 @@ class TtsItem:
     platform: Platform | None = None
 
 
+class UnreadableText(Exception):
+    """La voz no sabe pronunciar nada del texto (p. ej. todo en japonés con una voz española)."""
+
+
 async def edge_synthesize(text: str, voice: str, rate: int) -> bytes:
     """Genera el audio con el servicio de Edge. edge-tts ya escapa el texto para SSML."""
     communicate = edge_tts.Communicate(text, voice, rate=f"{rate:+d}%")
-    chunks = [c["data"] async for c in communicate.stream() if c["type"] == "audio"]
+    try:
+        chunks = [c["data"] async for c in communicate.stream() if c["type"] == "audio"]
+    except edge_tts.exceptions.NoAudioReceived:
+        # Edge no devuelve audio si ninguna palabra está en un alfabeto que la voz conozca
+        # (un texto mezclado sí suena: la voz se salta lo que no entiende)
+        raise UnreadableText from None
     return b"".join(chunks)
 
 
@@ -311,6 +320,10 @@ class TtsService:
             self.last_error = ""
         except asyncio.CancelledError:
             raise
+        except UnreadableText:
+            # No es un fallo de la app: se omite sin marcar error en la página del TTS
+            who = f" de {item.user_name}" if item.user_name else ""
+            log.info("TTS: se omite el mensaje%s: la voz %s no sabe leer ese idioma o alfabeto", who, cfg.voice)
         except Exception as exc:  # sin internet, voz inexistente, servicio de Edge caído...
             self.last_error = f"No se pudo leer un mensaje ({type(exc).__name__}). Revisa internet y la voz elegida."
             log.warning("TTS: %s", self.last_error)
