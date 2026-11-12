@@ -168,10 +168,7 @@ class AlpekaBot:
         if platform is Platform.TWITCH:
             info = await twitch_auth.authorize_account(role, on_code)
         else:
-            kc = self.config.kick
-            info = await kick_auth.authorize_account(
-                kc.client_id, kick_auth.get_client_secret(), kc.redirect_url, role
-            )
+            info = await kick_auth.authorize_account(self.platforms[Platform.KICK].app(), role)
         self.bus.account_changed.emit(platform, role, info)
         return info
 

@@ -16,7 +16,7 @@ from alpekabot.config import AppConfig, KickConfig
 from alpekabot.core.event_bus import EventBus
 from alpekabot.core.models import AccountInfo, AccountRole, EventKind, Platform
 from alpekabot.platforms.base import PlatformError
-from alpekabot.platforms.kick import auth
+from alpekabot.platforms.kick import auth, relay
 from alpekabot.platforms.kick.api import KickUnauthorized
 from alpekabot.platforms.kick.client import (
     KickClient,
@@ -30,6 +30,9 @@ from alpekabot.platforms.kick.webhook import WEBHOOK_PATH, SignatureVerifier, We
 
 def run(coro):
     return asyncio.run(coro)
+
+
+OWN_APP = auth.KickApp("cid", "secret", "http://localhost:17564/callback")
 
 
 # ------------------------------------------------------------- utilidades
@@ -327,21 +330,48 @@ def test_token_caducado_se_renueva(fake_store, monkeypatch):
                                       "user_id": "1", "login": "bot", "display_name": "Bot"}
     calls = []
 
-    async def fake_token_request(form):
-        calls.append(form)
+    async def fake_token_request(form, url=auth.TOKEN_URL):
+        calls.append((form, url))
         return {"access_token": "nuevo", "refresh_token": "r2", "expires_in": 3600}
 
     monkeypatch.setattr(auth, "_token_request", fake_token_request)
-    store = auth.TokenStore(AccountRole.BOT, "cid", "secret")
+    store = auth.TokenStore(AccountRole.BOT, OWN_APP)
     assert run(store.access_token()) == "nuevo"
-    assert calls[0]["grant_type"] == "refresh_token" and calls[0]["refresh_token"] == "r1"
+    form, url = calls[0]
+    assert form["grant_type"] == "refresh_token" and form["refresh_token"] == "r1"
+    assert form["client_id"] == "cid" and form["client_secret"] == "secret" and url == auth.TOKEN_URL
     assert fake_store["kick/account/bot"]["refresh_token"] == "r2"
     assert run(store.access_token()) == "nuevo" and len(calls) == 1   # ya no hace falta renovar
 
 
+def test_renovacion_con_app_compartida_va_al_intermediario_sin_secreto(fake_store, monkeypatch):
+    fake_store["kick/account/bot"] = {"access_token": "viejo", "refresh_token": "r1", "expires_at": 0,
+                                      "user_id": "1", "login": "bot", "display_name": "Bot"}
+    calls = []
+
+    async def fake_token_request(form, url=auth.TOKEN_URL):
+        calls.append((form, url))
+        return {"access_token": "nuevo", "refresh_token": "r2", "expires_in": 3600}
+
+    monkeypatch.setattr(auth, "_token_request", fake_token_request)
+    monkeypatch.setattr(relay, "RELAY_BASE", "https://relay.test/")
+    app = auth.shared_app()
+    assert app.shared and app.client_id == relay.SHARED_CLIENT_ID
+    run(auth.TokenStore(AccountRole.BOT, app).access_token())
+    form, url = calls[0]
+    assert url == "https://relay.test/oauth/token"
+    assert form == {"grant_type": "refresh_token", "refresh_token": "r1"}  # ni client_id ni secreto
+
+
+def test_app_propia_sin_secreto_no_vale():
+    with pytest.raises(PlatformError):
+        auth.KickApp("cid", "", "http://localhost:1/callback").check()
+    auth.KickApp("cid", "", "http://localhost:1/callback", "https://relay.test/oauth/token").check()
+
+
 def test_sin_cuenta_guardada(fake_store):
     with pytest.raises(auth.NotAuthorizedError):
-        auth.TokenStore(AccountRole.STREAMER, "cid", "secret")
+        auth.TokenStore(AccountRole.STREAMER, OWN_APP)
 
 
 def test_call_reintenta_tras_401():
@@ -375,6 +405,7 @@ def test_connect_all_omite_plataformas_sin_configurar(monkeypatch):
     from alpekabot.platforms.twitch import auth as twitch_auth
     # Twitch está «configurado» si hay cuentas guardadas: no leer el keyring real
     monkeypatch.setattr(twitch_auth, "load_account", lambda role: None)
+    monkeypatch.setattr(auth, "load_account", lambda role: None)  # Kick con app compartida: igual
     bot = AlpekaBot(AppConfig(), db_path=":memory:")
     assert run(bot.connect_all()) == ["Configura Twitch o Kick en Configuración para empezar."]
     assert set(bot.platforms) == {Platform.TWITCH, Platform.KICK}
@@ -437,7 +468,8 @@ def test_flujo_completo_contra_api_falsa(monkeypatch, db):
         monkeypatch.setattr(kick_api, "API_BASE", f"http://127.0.0.1:{runner.addresses[0][1]}/public/v1/")
 
         bot = FakeBot()
-        client = KickClient(KickConfig(client_id="cid", ngrok_domain="mi.ngrok-free.app"), bot.bus)
+        client = KickClient(KickConfig(use_own_app=True, client_id="cid", ngrok_domain="mi.ngrok-free.app"),
+                            bot.bus)
 
         async def fake_tunnel(token, domain, port):
             assert token == "ngk" and domain == "mi.ngrok-free.app"

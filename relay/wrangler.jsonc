@@ -1,0 +1,20 @@
+// Configuración del Worker intermediario de Kick (ver README.md).
+// Los secretos NO van aquí: `npx wrangler secret put KICK_CLIENT_SECRET` y `... ALLOWED_CHANNELS`.
+{
+  "name": "alpekabot-kick",
+  "main": "src/index.js",
+  "compatibility_date": "2025-09-01",
+  "workers_dev": true,
+  "vars": {
+    // App de Kick compartida (el Client ID no es secreto)
+    "KICK_CLIENT_ID": "01M6W2VRTN8KR46WBMCBX75MS6",
+    "KICK_API_BASE": "https://api.kick.com/public/v1/",
+    "KICK_ID_BASE": "https://id.kick.com/"
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "CHANNELS", "class_name": "KickChannel" }]
+  },
+  // El plan gratuito solo admite Durable Objects con SQLite
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["KickChannel"] }],
+  "observability": { "enabled": true }
+}

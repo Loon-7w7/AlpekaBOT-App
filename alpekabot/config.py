@@ -24,6 +24,9 @@ class TwitchConfig:
 
 @dataclass
 class KickConfig:
+    # False = app compartida de AlpekaBOT vía el intermediario de Cloudflare (relay/).
+    # True = app propia + ngrok (avanzado): usa los campos de abajo.
+    use_own_app: bool = False
     client_id: str = ""
     # Debe coincidir EXACTAMENTE con la "Redirect URL" de la app en kick.com → Settings → Developer
     redirect_url: str = "http://localhost:17564/callback"

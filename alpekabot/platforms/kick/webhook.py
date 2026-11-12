@@ -18,10 +18,12 @@ import json
 import logging
 import time
 from collections import OrderedDict
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Awaitable, Callable
 
 from aiohttp import web
+from multidict import CIMultiDict
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
@@ -118,23 +120,31 @@ class WebhookServer:
             self._runner = None
 
     async def handle(self, request: web.Request) -> web.Response:
-        h = request.headers
+        # client_max_size ya limita el cuerpo a MAX_BODY (aiohttp responde 413)
+        status, text = await self.process(request.headers, await request.read())
+        return web.Response(status=status, text=text)
+
+    async def process(self, headers: Mapping[str, str], body: bytes) -> tuple[int, str]:
+        """Valida y entrega un evento. Sirve para el servidor local (ngrok) y para lo que
+        llega por el intermediario de AlpekaBOT (mismas cabeceras y cuerpo de Kick)."""
+        h = CIMultiDict(headers)  # nombres de cabecera sin distinguir mayúsculas
         msg_id = h.get("Kick-Event-Message-Id", "")
         ts = h.get("Kick-Event-Message-Timestamp", "")
         sig = h.get("Kick-Event-Signature", "")
         ev_type = h.get("Kick-Event-Type", "")
         if not (msg_id and ts and sig and ev_type):
-            return web.Response(status=400, text="faltan cabeceras")
+            return 400, "faltan cabeceras"
+        if len(body) > MAX_BODY:
+            return 413, "demasiado grande"
         sent_at = _parse_ts(ts)
         if sent_at is None or abs(self._clock() - sent_at) > MAX_AGE_S:
             log.warning("Webhook de Kick rechazado: marca de tiempo fuera de rango")
-            return web.Response(status=400, text="timestamp")
-        body = await request.read()
+            return 400, "timestamp"
         if not await self._verifier.verify(msg_id, ts, body, sig):
             log.warning("Webhook de Kick rechazado: firma no válida")
-            return web.Response(status=401, text="firma")
+            return 401, "firma"
         if msg_id in self._seen:
-            return web.Response(text="duplicado")
+            return 200, "duplicado"
         self._seen[msg_id] = None
         while len(self._seen) > DEDUP_SIZE:
             self._seen.popitem(last=False)
@@ -142,9 +152,9 @@ class WebhookServer:
             payload = json.loads(body)
             version = int(h.get("Kick-Event-Version", "1"))
         except ValueError:
-            return web.Response(status=400, text="json")
+            return 400, "json"
         try:
             self._on_event(ev_type, version, payload)
         except Exception:
             log.exception("Error procesando el evento %s de Kick", ev_type)
-        return web.Response(text="ok")
+        return 200, "ok"

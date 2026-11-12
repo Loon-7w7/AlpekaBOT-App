@@ -149,7 +149,7 @@ class SettingsDialog(ModalDialog):
     update_found = Signal(object)  # UpdateInfo
 
     def __init__(self, bot: AlpekaBot, parent=None) -> None:
-        super().__init__("Configuración", "Cuentas de Twitch y Kick, túnel de ngrok y clave de YouTube.",
+        super().__init__("Configuración", "Cuentas de Twitch y Kick, clave de YouTube y actualizaciones.",
                          "settings", parent, width=720)
         self.bot = bot
         self._update_task: asyncio.Task | None = None
@@ -290,10 +290,29 @@ class SettingsDialog(ModalDialog):
         tip.setWordWrap(True)
         acc_form.addRow(tip)
 
+        shared_help = QLabel(
+            f"<b style='color:{t.AMBER}'>Solo por white list.</b> "
+            "Solo tienes que iniciar sesión con tus dos cuentas: AlpekaBOT usa su propia app de Kick y "
+            "su servidor, sin ngrok ni claves. Tu canal debe estar en la <b>white list</b> del administrador "
+            "de AlpekaBOT: si al conectar te dice que no lo está, pásale el nombre de tu canal."
+        )
+        shared_help.setWordWrap(True)
+        self._kick_own = QCheckBox("Usar mi propia app de Kick y ngrok (avanzado)")
+        self._kick_own.setChecked(cfg.use_own_app)
+
+        def on_own(checked: bool) -> None:
+            box.setVisible(checked)
+            shared_help.setVisible(not checked)
+
+        self._kick_own.toggled.connect(on_own)
+        on_own(cfg.use_own_app)
+
         page = QWidget()
         lay = QVBoxLayout(page)
-        lay.addWidget(box)
+        lay.addWidget(shared_help)
         lay.addWidget(acc_box)
+        lay.addWidget(self._kick_own)
+        lay.addWidget(box)
         lay.addStretch(1)
         return page
 
@@ -302,6 +321,15 @@ class SettingsDialog(ModalDialog):
         self._webhook_url.setText(f"https://{domain}{WEBHOOK_PATH}" if domain else "")
 
     def _save_kick(self) -> bool:
+        cfg = self.bot.config.kick
+        own = self._kick_own.isChecked()
+        changed = own != cfg.use_own_app
+        if not own:
+            cfg.use_own_app = False
+            self.bot.config.save()
+            if changed and self.bot.platforms[Platform.KICK].is_connected:
+                self.note("Reconecta Kick para aplicar los cambios.")
+            return True
         client_id = self._kick_id.text().strip()
         secret = self._kick_secret.text().strip()
         redirect = self._kick_redirect.text().strip()
@@ -315,7 +343,7 @@ class SettingsDialog(ModalDialog):
         if not redirect.startswith("http://localhost:"):
             QMessageBox.warning(self, "Kick", "La Redirect URL debe ser del tipo http://localhost:PUERTO/callback")
             return False
-        cfg = self.bot.config.kick
+        cfg.use_own_app = True
         cfg.client_id, cfg.redirect_url, cfg.ngrok_domain = client_id, redirect, domain
         kick_auth.set_client_secret(secret)
         credentials.set_secret(kick_auth.NGROK_TOKEN_KEY, token)
@@ -323,9 +351,6 @@ class SettingsDialog(ModalDialog):
         if self.bot.platforms[Platform.KICK].is_connected:
             self.note("Reconecta Kick para aplicar los cambios.")
         return True
-
-    def _kick_has_input(self) -> bool:
-        return any(w.text().strip() for w in (self._kick_id, self._kick_secret, self._ngrok_token, self._ngrok_domain))
 
     # --------------------------------------------------------------- youtube
     def _build_youtube_tab(self) -> QWidget:
@@ -423,8 +448,7 @@ class SettingsDialog(ModalDialog):
     def _on_save(self) -> None:
         self._save_youtube()
         self._save_twitch()
-        # Kick se guarda solo si lo estás configurando (puedes usar solo Twitch)
-        if self._kick_has_input() and not self._save_kick():
+        if not self._save_kick():  # con app propia valida los campos
             return
         log.info("Configuración guardada")
         self.accept()

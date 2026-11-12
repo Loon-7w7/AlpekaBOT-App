@@ -1,4 +1,8 @@
-"""Conexión a Kick: chat entrante por webhooks (vía ngrok) y salida por la API pública."""
+"""Conexión a Kick: chat entrante por webhooks y salida por la API pública.
+
+Los webhooks llegan por el intermediario de AlpekaBOT (app compartida, por defecto)
+o por ngrok a un servidor local (app propia, avanzado).
+"""
 
 from __future__ import annotations
 
@@ -23,8 +27,9 @@ from ...core.models import (
     StreamInfo,
 )
 from ..base import PlatformClient, PlatformError
-from . import auth
+from . import auth, relay
 from .api import KickAPI, KickAPIError, KickUnauthorized
+from .relay import RelayConnection
 from .tunnel import NgrokTunnel, normalize_domain
 from .webhook import WEBHOOK_PATH, SignatureVerifier, WebhookServer
 
@@ -133,6 +138,7 @@ class KickClient(PlatformClient):
         self._tokens: dict[AccountRole, auth.TokenStore] = {}
         self._webhook: WebhookServer | None = None
         self._tunnel = NgrokTunnel()
+        self._relay: RelayConnection | None = None
         self._sub_ids: list[str] = []
         self._poll_task: asyncio.Task | None = None
         self.bot: AccountInfo | None = None
@@ -142,7 +148,14 @@ class KickClient(PlatformClient):
 
     @property
     def is_configured(self) -> bool:
-        return bool(self._config.client_id)
+        if self._config.use_own_app:
+            return bool(self._config.client_id)
+        # App compartida: «configurado» = hay alguna cuenta conectada
+        return any(auth.load_account(role) is not None for role in AccountRole)
+
+    def app(self) -> auth.KickApp:
+        cfg = self._config
+        return auth.own_app(cfg.client_id, cfg.redirect_url) if cfg.use_own_app else auth.shared_app()
 
     @property
     def bot_user_id(self) -> str | None:
@@ -192,8 +205,8 @@ class KickClient(PlatformClient):
 
     async def _connect(self) -> None:
         cfg = self._config
-        secret = auth.get_client_secret()
-        self._tokens = {r: auth.TokenStore(r, cfg.client_id, secret) for r in AccountRole}
+        kick_app = self.app()
+        self._tokens = {r: auth.TokenStore(r, kick_app) for r in AccountRole}
         # Comprueba ambas sesiones (y renueva tokens si hace falta)
         bot_user = await self._call(AccountRole.BOT, self._api.current_user)
         streamer_user = await self._call(AccountRole.STREAMER, self._api.current_user)
@@ -205,9 +218,15 @@ class KickClient(PlatformClient):
         verifier = SignatureVerifier(self._api.public_key)
         await verifier.load()
         self._webhook = WebhookServer(verifier, self._on_event)
-        port = await self._webhook.start()
-        domain = normalize_domain(cfg.ngrok_domain)
-        await self._tunnel.start(credentials.get_secret(auth.NGROK_TOKEN_KEY) or "", domain, port)
+        if cfg.use_own_app:
+            port = await self._webhook.start()
+            domain = normalize_domain(cfg.ngrok_domain)
+            await self._tunnel.start(credentials.get_secret(auth.NGROK_TOKEN_KEY) or "", domain, port)
+        else:
+            # Los eventos llegan por el intermediario y se verifican igual (firma de Kick)
+            self._relay = RelayConnection(relay.RELAY_BASE, self._tokens[AccountRole.STREAMER],
+                                          self._webhook.process, channel=self.streamer.login)
+            await self._relay.start()
 
         await self._subscribe()
         await self._refresh_stream()
@@ -247,6 +266,9 @@ class KickClient(PlatformClient):
                 log.info("No se pudieron borrar las suscripciones de Kick (se reutilizarán al conectar)")
             self._sub_ids = []
         await self._tunnel.close()
+        if self._relay is not None:
+            await self._relay.close()
+            self._relay = None
         if self._webhook is not None:
             await self._webhook.close()
             self._webhook = None

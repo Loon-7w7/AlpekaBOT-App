@@ -14,6 +14,7 @@ import hashlib
 import logging
 import secrets
 import time
+from dataclasses import dataclass
 from urllib.parse import urlencode, urlparse
 
 import aiohttp
@@ -22,7 +23,9 @@ from aiohttp import web
 from ... import credentials
 from ...core.models import AccountInfo, AccountRole, Platform
 from ..base import PlatformError, open_in_browser
+from . import relay
 from .api import ID_BASE, KickAPI, KickAPIError
+from .relay import SHARED_CLIENT_ID, SHARED_REDIRECT_URL
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +55,40 @@ NGROK_TOKEN_KEY = "ngrok/authtoken"
 _DONE_HTML = """<!doctype html><meta charset="utf-8"><title>AlpekaBOT</title>
 <body style="font-family:sans-serif;background:#18181d;color:#e6e6ea;text-align:center;padding-top:15vh">
 <h2>{title}</h2><p>{text}</p></body>"""
+
+
+TOKEN_URL = ID_BASE + "oauth/token"
+
+
+@dataclass(frozen=True)
+class KickApp:
+    """App de Kick con la que se inicia sesión.
+
+    * Compartida (por defecto): sin secreto; los tokens se piden al intermediario
+      de AlpekaBOT, que añade el client_secret (``relay.RELAY_BASE``).
+    * Propia (avanzado): Client ID + Client Secret del usuario, directo a id.kick.com.
+    """
+
+    client_id: str
+    secret: str
+    redirect_url: str
+    token_url: str = TOKEN_URL
+
+    @property
+    def shared(self) -> bool:
+        return self.token_url != TOKEN_URL
+
+    def check(self) -> None:
+        if not self.client_id or (not self.shared and not self.secret):
+            raise PlatformError("Falta el Client ID o el Client Secret de Kick (Configuración → Kick).")
+
+
+def shared_app() -> KickApp:
+    return KickApp(SHARED_CLIENT_ID, "", SHARED_REDIRECT_URL, relay.RELAY_BASE + "oauth/token")
+
+
+def own_app(client_id: str, redirect_url: str) -> KickApp:
+    return KickApp(client_id, get_client_secret(), redirect_url)
 
 
 def _token_key(role: AccountRole) -> str:
@@ -152,10 +189,10 @@ async def wait_for_code(redirect_url: str, state: str, timeout: float = AUTH_TIM
         await runner.cleanup()
 
 
-async def _token_request(form: dict[str, str]) -> dict:
+async def _token_request(form: dict[str, str], url: str = TOKEN_URL) -> dict:
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as http:
-            async with http.post(ID_BASE + "oauth/token", data=form) as r:
+            async with http.post(url, data=form) as r:
                 status = r.status
                 data = await r.json(content_type=None)
     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
@@ -168,9 +205,11 @@ async def _token_request(form: dict[str, str]) -> dict:
     return data
 
 
-def _check_credentials(client_id: str, secret: str) -> None:
-    if not client_id or not secret:
-        raise PlatformError("Falta el Client ID o el Client Secret de Kick (Configuración → Kick).")
+def _app_form(app: KickApp, form: dict[str, str]) -> dict[str, str]:
+    """Con la app compartida el client_id y el secreto los pone el intermediario."""
+    if app.shared:
+        return form
+    return {**form, "client_id": app.client_id, "client_secret": app.secret}
 
 
 def _save(role: AccountRole, tokens: dict, user: dict) -> AccountInfo:
@@ -189,20 +228,21 @@ def _save(role: AccountRole, tokens: dict, user: dict) -> AccountInfo:
     return info
 
 
-async def authorize_account(client_id: str, secret: str, redirect_url: str, role: AccountRole) -> AccountInfo:
-    _check_credentials(client_id, secret)
+async def authorize_account(app: KickApp, role: AccountRole) -> AccountInfo:
+    app.check()
     verifier, challenge = make_pkce()
     state = secrets.token_urlsafe(24)
-    url = build_authorize_url(client_id, redirect_url, SCOPES[role], state, challenge)
-    code = await wait_for_code(redirect_url, state, open_url=url)
-    tokens = await _token_request({
-        "grant_type": "authorization_code", "client_id": client_id, "client_secret": secret,
-        "redirect_uri": redirect_url, "code_verifier": verifier, "code": code,
-    })
+    url = build_authorize_url(app.client_id, app.redirect_url, SCOPES[role], state, challenge)
+    code = await wait_for_code(app.redirect_url, state, open_url=url)
+    tokens = await _token_request(_app_form(app, {
+        "grant_type": "authorization_code", "redirect_uri": app.redirect_url,
+        "code_verifier": verifier, "code": code,
+    }), app.token_url)
     granted = set(str(tokens.get("scope", "")).split())
     missing = [s for s in SCOPES[role] if granted and s not in granted]
     if missing:
-        raise PlatformError(f"Kick no concedió todos los permisos ({', '.join(missing)}). Revisa los scopes de tu app.")
+        hint = "Avisa al administrador de AlpekaBOT." if app.shared else "Revisa los scopes de tu app."
+        raise PlatformError(f"Kick no concedió todos los permisos ({', '.join(missing)}). {hint}")
     api = KickAPI()
     try:
         user = await api.current_user(tokens["access_token"])
@@ -216,8 +256,8 @@ async def authorize_account(client_id: str, secret: str, redirect_url: str, role
 class TokenStore:
     """Token de una cuenta con renovación automática (segura ante llamadas simultáneas)."""
 
-    def __init__(self, role: AccountRole, client_id: str, secret: str) -> None:
-        _check_credentials(client_id, secret)
+    def __init__(self, role: AccountRole, app: KickApp) -> None:
+        app.check()
         data = credentials.get_json(_token_key(role))
         if not data:
             raise NotAuthorizedError(role)
@@ -225,7 +265,7 @@ class TokenStore:
         if any(s not in granted for s in SCOPES[role]):
             raise NotAuthorizedError(role, "faltan permisos nuevos")
         self.role = role
-        self._client_id, self._secret = client_id, secret
+        self._app = app
         self._data = data
         self._lock = asyncio.Lock()
 
@@ -247,10 +287,9 @@ class TokenStore:
             if not self._data.get("refresh_token"):
                 raise NotAuthorizedError(self.role, "la sesión caducó")
             try:
-                tokens = await _token_request({
-                    "grant_type": "refresh_token", "client_id": self._client_id,
-                    "client_secret": self._secret, "refresh_token": self._data["refresh_token"],
-                })
+                tokens = await _token_request(_app_form(self._app, {
+                    "grant_type": "refresh_token", "refresh_token": self._data["refresh_token"],
+                }), self._app.token_url)
             except KickAPIError as exc:
                 if exc.status in (400, 401):
                     raise NotAuthorizedError(self.role, "la sesión caducó") from None

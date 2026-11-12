@@ -17,3 +17,8 @@ dist/
 .vscode/
 .idea/
 Thumbs.db
+
+# Worker de Kick (relay/): estado local de wrangler, dependencias y secretos de desarrollo
+relay/.wrangler/
+relay/node_modules/
+relay/.dev.vars
