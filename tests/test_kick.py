@@ -370,8 +370,11 @@ def test_normalize_domain():
     assert normalize_domain("mi-bot.ngrok-free.app") == "mi-bot.ngrok-free.app"
 
 
-def test_connect_all_omite_plataformas_sin_configurar():
+def test_connect_all_omite_plataformas_sin_configurar(monkeypatch):
     from alpekabot.bot import AlpekaBot
+    from alpekabot.platforms.twitch import auth as twitch_auth
+    # Twitch está «configurado» si hay cuentas guardadas: no leer el keyring real
+    monkeypatch.setattr(twitch_auth, "load_account", lambda role: None)
     bot = AlpekaBot(AppConfig(), db_path=":memory:")
     assert run(bot.connect_all()) == ["Configura Twitch o Kick en Configuración para empezar."]
     assert set(bot.platforms) == {Platform.TWITCH, Platform.KICK}

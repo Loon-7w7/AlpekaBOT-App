@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -47,6 +48,7 @@ class AlpekaBot:
         if real_data:
             ensure_dirs()
             db_path = DB_FILE
+            twitch_auth.cleanup_legacy_secret()  # de cuando cada usuario ponía su app de Twitch
         self.db = Database(db_path)
         self.commands = CommandRepository(self.db, self.bus)
         self.timers = TimerRepository(self.db, self.bus)
@@ -160,12 +162,11 @@ class AlpekaBot:
         module = twitch_auth if platform is Platform.TWITCH else kick_auth
         return module.load_account(role)
 
-    async def authorize(self, platform: Platform, role: AccountRole) -> AccountInfo:
+    async def authorize(self, platform: Platform, role: AccountRole,
+                        on_code: Callable[[str, str], None] | None = None) -> AccountInfo:
+        """Inicia sesión con una cuenta. En Twitch, ``on_code(código, url)`` recibe el código a confirmar."""
         if platform is Platform.TWITCH:
-            tw = self.config.twitch
-            info = await twitch_auth.authorize_account(
-                tw.client_id, twitch_auth.get_client_secret(), tw.redirect_url, role
-            )
+            info = await twitch_auth.authorize_account(role, on_code)
         else:
             kc = self.config.kick
             info = await kick_auth.authorize_account(

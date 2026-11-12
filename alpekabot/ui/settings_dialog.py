@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from html import escape
 
 from PySide6.QtCore import Signal
 from PySide6.QtGui import QGuiApplication
@@ -31,18 +32,14 @@ from ..platforms.kick import auth as kick_auth
 from ..platforms.kick.tunnel import normalize_domain
 from ..platforms.kick.webhook import WEBHOOK_PATH
 from ..platforms.base import PlatformError
-from ..platforms.twitch import auth as twitch_auth
 from . import theme as t
 from .widgets import ModalDialog, button
 
 log = logging.getLogger(__name__)
 
 _TWITCH_HELP = (
-    "1. Entra en <a href='https://dev.twitch.tv/console/apps'>dev.twitch.tv/console/apps</a> "
-    "y pulsa <b>Register Your Application</b>.<br>"
-    "2. En <b>OAuth Redirect URLs</b> pon exactamente la URL de abajo.<br>"
-    "3. Categoría: <i>Chat Bot</i>. Tipo de cliente: <i>Confidential</i>.<br>"
-    "4. Copia aquí el <b>Client ID</b> y genera un <b>Client Secret</b>."
+    "Solo tienes que iniciar sesión con tus dos cuentas: al pulsar <b>Conectar</b> se abre "
+    "<b>twitch.tv/activate</b> con un código. Comprueba que coincide con el de aquí y pulsa <b>Activar</b>."
 )
 
 
@@ -58,6 +55,13 @@ class _AccountRow(QWidget):
 
         self._status = QLabel()
         self._status.setToolTip(hint)
+        self._status.setWordWrap(True)
+        self._status.setOpenExternalLinks(True)
+        self._code_url = ""
+        # Twitch: copiar el enlace de activación (p. ej. para abrirlo en una ventana de incógnito)
+        self._copy_link = QPushButton("Copiar enlace")
+        self._copy_link.clicked.connect(lambda: QGuiApplication.clipboard().setText(self._code_url))
+        self._copy_link.hide()
         self._connect = QPushButton()
         self._connect.clicked.connect(self._on_connect_clicked)
         self._forget = QPushButton("Olvidar")
@@ -66,6 +70,7 @@ class _AccountRow(QWidget):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(self._status, 1)
+        lay.addWidget(self._copy_link)
         lay.addWidget(self._connect)
         lay.addWidget(self._forget)
         self.refresh()
@@ -75,6 +80,7 @@ class _AccountRow(QWidget):
         self._set_info(info)
 
     def _set_info(self, info: AccountInfo | None) -> None:
+        self._copy_link.hide()
         if info:
             self._status.setText(f"✅ <b>{info.display_name}</b> <span style='color:#6b7280'>({info.login})</span>")
             self._connect.setText("Cambiar cuenta")
@@ -99,7 +105,7 @@ class _AccountRow(QWidget):
         )
         name = self._platform.label
         try:
-            info = await self._dialog.bot.authorize(self._platform, self._role)
+            info = await self._dialog.bot.authorize(self._platform, self._role, self._show_code)
             self._set_info(info)
             if self._dialog.bot.platforms[self._platform].is_connected:
                 self._dialog.note(f"Reconecta {name} para usar la nueva cuenta.")
@@ -115,6 +121,16 @@ class _AccountRow(QWidget):
             log.exception("Error autorizando cuenta %s de %s", self._role.value, name)
             self.refresh()
             QMessageBox.critical(self, name, f"Error inesperado ({type(exc).__name__}).")
+
+    def _show_code(self, code: str, url: str) -> None:
+        """Twitch (Device Code): el código que el usuario debe confirmar en twitch.tv/activate."""
+        self._code_url = url
+        self._status.setText(
+            f"Código: <b style='font-size:15px; letter-spacing:2px'>{escape(code)}</b><br>"
+            f"Confírmalo en <a href='{escape(url, quote=True)}'>twitch.tv/activate</a> con la cuenta del "
+            f"<b>{self._role.label.lower()}</b>. ¿Sale otra cuenta? Copia el enlace en una ventana de incógnito."
+        )
+        self._copy_link.show()
 
     def _on_forget(self) -> None:
         answer = QMessageBox.question(
@@ -161,35 +177,7 @@ class SettingsDialog(ModalDialog):
         cfg = self.bot.config.twitch
 
         help_label = QLabel(_TWITCH_HELP)
-        help_label.setOpenExternalLinks(True)
         help_label.setWordWrap(True)
-
-        self._client_id = QLineEdit(cfg.client_id)
-        self._client_secret = QLineEdit(twitch_auth.get_client_secret())
-        self._client_secret.setEchoMode(QLineEdit.Password)
-        show = QPushButton("👁")
-        show.setFixedWidth(36)
-        show.setCheckable(True)
-        show.toggled.connect(
-            lambda on: self._client_secret.setEchoMode(QLineEdit.Normal if on else QLineEdit.Password)
-        )
-        secret_row = QHBoxLayout()
-        secret_row.addWidget(self._client_secret)
-        secret_row.addWidget(show)
-
-        self._redirect = QLineEdit(cfg.redirect_url)
-        copy = QPushButton("Copiar")
-        copy.clicked.connect(lambda: QGuiApplication.clipboard().setText(self._redirect.text()))
-        redirect_row = QHBoxLayout()
-        redirect_row.addWidget(self._redirect)
-        redirect_row.addWidget(copy)
-
-        app_box = QGroupBox("Aplicación de Twitch")
-        form = QFormLayout(app_box)
-        form.addRow(help_label)
-        form.addRow("Client ID:", self._client_id)
-        form.addRow("Client Secret:", secret_row)
-        form.addRow("Redirect URL:", redirect_row)
 
         rows = [
             _AccountRow(self, Platform.TWITCH, AccountRole.BOT, "La cuenta que escribe en el chat"),
@@ -198,11 +186,13 @@ class SettingsDialog(ModalDialog):
         self._rows += rows
         acc_box = QGroupBox("Cuentas")
         acc_form = QFormLayout(acc_box)
+        acc_form.addRow(help_label)
         acc_form.addRow("Bot:", rows[0])
         acc_form.addRow("Streamer:", rows[1])
         tip = QLabel(
-            "<span style='color:#6b7280'>Al conectar cada cuenta se abre el navegador. Si ya tienes una "
-            "sesión iniciada en Twitch, pulsa «¿No eres tú?» para cambiar de cuenta.</span>"
+            "<span style='color:#6b7280'>Twitch usa la cuenta que tengas abierta en el navegador. Antes de "
+            "conectar la del <b>bot</b>, cambia de cuenta en twitch.tv o abre el enlace en una ventana de "
+            "incógnito; comprueba aquí el nombre que aparece. Haz al bot moderador: /mod nombre_del_bot.</span>"
         )
         tip.setWordWrap(True)
         acc_form.addRow(tip)
@@ -212,7 +202,6 @@ class SettingsDialog(ModalDialog):
 
         page = QWidget()
         lay = QVBoxLayout(page)
-        lay.addWidget(app_box)
         lay.addWidget(acc_box)
         lay.addWidget(self._auto_connect)
         lay.addStretch(1)
@@ -425,34 +414,16 @@ class SettingsDialog(ModalDialog):
     def save_platform_settings(self, platform: Platform) -> bool:
         return self._save_twitch() if platform is Platform.TWITCH else self._save_kick()
 
-    def _twitch_has_input(self) -> bool:
-        return any(w.text().strip() for w in (self._client_id, self._client_secret))
-
     def _save_twitch(self) -> bool:
-        client_id = self._client_id.text().strip()
-        secret = self._client_secret.text().strip()
-        redirect = self._redirect.text().strip()
-        if not client_id or not secret:
-            QMessageBox.warning(self, "Twitch", "Rellena el Client ID y el Client Secret primero.")
-            return False
-        if not redirect.startswith("http://localhost:"):
-            QMessageBox.warning(self, "Twitch", "La Redirect URL debe ser del tipo http://localhost:PUERTO")
-            return False
-        cfg = self.bot.config.twitch
-        changed = (client_id, redirect) != (cfg.client_id, cfg.redirect_url) or secret != twitch_auth.get_client_secret()
-        cfg.client_id, cfg.redirect_url = client_id, redirect
-        cfg.auto_connect = self._auto_connect.isChecked()
-        twitch_auth.set_client_secret(secret)
+        # La app de Twitch es compartida: solo queda la preferencia de conexión automática
+        self.bot.config.twitch.auto_connect = self._auto_connect.isChecked()
         self.bot.config.save()
-        if changed and self.bot.platforms[Platform.TWITCH].is_connected:
-            self.note("Reconecta Twitch para aplicar los cambios.")
         return True
 
     def _on_save(self) -> None:
         self._save_youtube()
-        # Cada plataforma se guarda solo si la estás configurando (puedes usar solo una)
-        if self._twitch_has_input() and not self._save_twitch():
-            return
+        self._save_twitch()
+        # Kick se guarda solo si lo estás configurando (puedes usar solo Twitch)
         if self._kick_has_input() and not self._save_kick():
             return
         log.info("Configuración guardada")

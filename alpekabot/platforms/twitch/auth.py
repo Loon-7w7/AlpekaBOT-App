@@ -1,5 +1,9 @@
 """Autenticación OAuth de Twitch para las dos cuentas (bot y streamer).
 
+AlpekaBOT usa UNA app de Twitch compartida de tipo **Público** (sin client secret):
+los usuarios solo inician sesión, con el flujo *Device Code* (la app muestra un
+código y el usuario lo confirma en twitch.tv/activate).
+
 Los tokens se guardan en el Administrador de credenciales de Windows junto con
 los datos básicos de la cuenta, para poder mostrarlos sin conectarse.
 """
@@ -8,10 +12,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from urllib.parse import urlparse
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
 
-from twitchAPI.helper import first
-from twitchAPI.oauth import UserAuthenticator
+import aiohttp
+import twitchAPI.oauth
+from twitchAPI.helper import TWITCH_AUTH_BASE_URL, build_scope, first
 from twitchAPI.twitch import Twitch
 from twitchAPI.type import (
     AuthScope,
@@ -19,6 +26,7 @@ from twitchAPI.type import (
     InvalidTokenException,
     MissingScopeException,
     TwitchAPIException,
+    UnauthorizedException,
 )
 
 from ... import credentials
@@ -27,7 +35,11 @@ from ..base import PlatformError, open_in_browser
 
 log = logging.getLogger(__name__)
 
-AUTH_TIMEOUT_S = 300  # 5 minutos para completar el login en el navegador
+# App pública compartida de AlpekaBOT (dev.twitch.tv). El Client ID no es secreto.
+CLIENT_ID = "ch3io8lbmfzl7payrhes0ugfk4dqmp"
+
+AUTH_TIMEOUT_S = 600  # 10 minutos para escribir el código en twitch.tv/activate
+HTTP_TIMEOUT = aiohttp.ClientTimeout(total=15)
 
 # Permisos mínimos por cuenta. Al añadir funciones (moderación, eventos...)
 # se amplían aquí y la app pedirá volver a conectar la cuenta.
@@ -51,7 +63,8 @@ SCOPES: dict[AccountRole, list[AuthScope]] = {
     ],
 }
 
-_CLIENT_SECRET_KEY = "twitch/client_secret"
+# Antes cada usuario ponía su propia app; su secreto ya no se usa y se borra.
+_LEGACY_SECRET_KEY = "twitch/client_secret"
 
 
 def _token_key(role: AccountRole) -> str:
@@ -67,16 +80,43 @@ class NotAuthorizedError(PlatformError):
         self.role = role
 
 
-# ---------------------------------------------------------------- secretos
-def get_client_secret() -> str:
-    return credentials.get_secret(_CLIENT_SECRET_KEY) or ""
+# ------------------------------------------------- renovación sin secreto
+async def _refresh_public(refresh_token: str, app_id: str, app_secret: str | None = None,
+                          session: aiohttp.ClientSession | None = None,
+                          auth_base_url: str = TWITCH_AUTH_BASE_URL) -> tuple[str, str]:
+    """Igual que ``twitchAPI.oauth.refresh_access_token`` pero sin mandar ``client_secret``
+    cuando no hay (una app pública no tiene; twitchAPI enviaría el texto "None").
+
+    Twitch rota el refresh token en cada uso: el nuevo lo guarda ``on_refresh``.
+    """
+    param = {"refresh_token": refresh_token, "client_id": app_id, "grant_type": "refresh_token"}
+    if app_secret:
+        param["client_secret"] = app_secret
+    ses = session if session is not None else aiohttp.ClientSession(timeout=HTTP_TIMEOUT)
+    try:
+        async with ses.post(auth_base_url + "token", data=param) as result:
+            data = await result.json(content_type=None)
+    finally:
+        if session is None:
+            await ses.close()
+    status = data.get("status", 200)
+    if status == 400:
+        raise InvalidRefreshTokenException(data.get("message", ""))
+    if status == 401:
+        raise UnauthorizedException(data.get("message", ""))
+    return data["access_token"], data["refresh_token"]
 
 
-def set_client_secret(secret: str) -> None:
-    if secret:
-        credentials.set_secret(_CLIENT_SECRET_KEY, secret)
-    else:
-        credentials.delete_secret(_CLIENT_SECRET_KEY)
+# twitch.py importa la función desde el módulo en cada renovación
+# (``from .oauth import refresh_access_token``), así que basta con sustituirla aquí.
+twitchAPI.oauth.refresh_access_token = _refresh_public
+
+
+# ---------------------------------------------------------------- cuentas
+def cleanup_legacy_secret() -> None:
+    if credentials.get_secret(_LEGACY_SECRET_KEY):
+        credentials.delete_secret(_LEGACY_SECRET_KEY)
+        log.info("Twitch: borrado el client secret antiguo (ya no hace falta)")
 
 
 def load_account(role: AccountRole) -> AccountInfo | None:
@@ -109,26 +149,14 @@ def _update_tokens(role: AccountRole, access: str, refresh: str) -> None:
     credentials.set_json(_token_key(role), data)
 
 
-def _require_app_credentials(client_id: str, secret: str) -> None:
-    if not client_id or not secret:
-        raise PlatformError(
-            "Falta el Client ID o el Client Secret de Twitch. Configúralos en Configuración → Twitch."
-        )
-
-
 def _safe_error(exc: BaseException) -> str:
-    """Descripción del error SIN su texto: twitchAPI incluye en él URLs con el client_secret."""
+    """Descripción del error SIN su texto (twitchAPI puede incluir URLs con credenciales)."""
     return type(exc).__name__
 
 
-async def _app_client(client_id: str, secret: str) -> Twitch:
-    try:
-        return await Twitch(client_id, secret)
-    except TwitchAPIException as exc:
-        log.warning("Twitch rechazó las credenciales de la app (%s)", _safe_error(exc))
-        raise PlatformError(
-            "Twitch rechazó el Client ID / Client Secret. Revisa que estén bien copiados."
-        ) from None  # 'from None' evita arrastrar el mensaje original (contiene el secreto)
+async def _client() -> Twitch:
+    # Sin secreto no hay token de app: todo va con el token del usuario
+    return await Twitch(CLIENT_ID, authenticate_app=False)
 
 
 async def _current_user(twitch: Twitch, role: AccountRole) -> AccountInfo:
@@ -138,59 +166,103 @@ async def _current_user(twitch: Twitch, role: AccountRole) -> AccountInfo:
     return AccountInfo(Platform.TWITCH, role, user.id, user.login, user.display_name)
 
 
-# ------------------------------------------------------------------- login
-async def authorize_account(client_id: str, secret: str, redirect_url: str, role: AccountRole) -> AccountInfo:
-    """Abre el navegador para que el usuario inicie sesión con la cuenta indicada."""
-    _require_app_credentials(client_id, secret)
-    twitch = await _app_client(client_id, secret)
-    port = urlparse(redirect_url).port or 80
-    auth = UserAuthenticator(
-        twitch,
-        SCOPES[role],
-        force_verify=True,  # permite elegir otra cuenta aunque ya haya sesión iniciada
-        url=redirect_url,
-        host="127.0.0.1",  # solo accesible desde este PC
-        port=port,
+# ------------------------------------------------------------ Device Code
+@dataclass(frozen=True)
+class DeviceCode:
+    device_code: str
+    user_code: str
+    verification_uri: str
+    expires_in: float
+    interval: float
+
+
+async def request_device_code(session: aiohttp.ClientSession, scopes: list[AuthScope],
+                              base_url: str = TWITCH_AUTH_BASE_URL) -> DeviceCode:
+    data = {"client_id": CLIENT_ID, "scopes": build_scope(scopes)}
+    async with session.post(base_url + "device", data=data) as resp:
+        body = await resp.json(content_type=None)
+    if resp.status != 200 or "device_code" not in body:
+        log.warning("Twitch rechazó la petición de código (HTTP %s: %s)", resp.status, body.get("message"))
+        raise PlatformError("Twitch no dio un código para iniciar sesión. Inténtalo de nuevo en un rato.")
+    return DeviceCode(
+        body["device_code"], body["user_code"], body["verification_uri"],
+        float(body.get("expires_in", 1800)), float(body.get("interval", 5)),
     )
+
+
+async def poll_device_token(session: aiohttp.ClientSession, code: DeviceCode, scopes: list[AuthScope],
+                            base_url: str = TWITCH_AUTH_BASE_URL,
+                            sleep: Callable[[float], object] = asyncio.sleep) -> tuple[str, str]:
+    """Espera a que el usuario confirme el código. Lanza TimeoutError si caduca."""
+    data = {
+        "client_id": CLIENT_ID,
+        "scopes": build_scope(scopes),
+        "device_code": code.device_code,
+        "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+    }
+    interval = max(code.interval, 1.0)
+    deadline = time.monotonic() + min(code.expires_in, AUTH_TIMEOUT_S)
+    while time.monotonic() < deadline:
+        await sleep(interval)
+        async with session.post(base_url + "token", data=data) as resp:
+            body = await resp.json(content_type=None)
+        if body.get("access_token"):
+            return body["access_token"], body["refresh_token"]
+        message = str(body.get("message", "")).lower()
+        if "pending" in message:
+            continue
+        if "slow_down" in message:
+            interval += 5
+            continue
+        if "denied" in message:
+            raise PlatformError("Se canceló la autorización en Twitch.")
+        if "invalid device code" in message or "expired" in message:
+            break
+        log.warning("Respuesta inesperada de Twitch al esperar el código (HTTP %s: %s)", resp.status, message)
+        raise PlatformError("Twitch devolvió un error durante el inicio de sesión. Inténtalo de nuevo.")
+    raise asyncio.TimeoutError
+
+
+# ------------------------------------------------------------------- login
+async def authorize_account(role: AccountRole,
+                            on_code: Callable[[str, str], None] | None = None) -> AccountInfo:
+    """Pide un código, abre twitch.tv/activate y espera a que el usuario lo confirme.
+
+    ``on_code(código, url)`` permite a la interfaz mostrar el código mientras tanto.
+    """
+    scopes = SCOPES[role]
+    async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
+        try:
+            code = await request_device_code(session, scopes)
+            if on_code is not None:
+                on_code(code.user_code, code.verification_uri)
+            await open_in_browser(code.verification_uri)
+            token, refresh = await poll_device_token(session, code, scopes)
+        except aiohttp.ClientError as exc:
+            log.warning("Sin conexión con Twitch al iniciar sesión (%s)", _safe_error(exc))
+            raise PlatformError("No se pudo contactar con Twitch. Revisa tu conexión a internet.") from None
+
+    twitch = await _client()
     try:
-        # use_browser=False: abrimos nosotros el navegador en otro hilo (ver open_in_browser)
-        token, refresh = await asyncio.wait_for(
-            auth.authenticate(use_browser=False, auth_url_callback=open_in_browser), AUTH_TIMEOUT_S
-        )
-        await twitch.set_user_authentication(token, SCOPES[role], refresh)
+        await twitch.set_user_authentication(token, scopes, refresh)
         info = await _current_user(twitch, role)
         _save(role, token, refresh, info)
         log.info("Cuenta %s de Twitch conectada: %s", role.value, info.login)
         return info
-    except (asyncio.TimeoutError, asyncio.CancelledError):
-        _stop_quietly(auth)
-        raise
     except TwitchAPIException as exc:
-        _stop_quietly(auth)
         log.warning("Login de Twitch fallido (%s)", _safe_error(exc))
-        raise PlatformError(
-            "No se pudo completar el login de Twitch. Comprueba que la Redirect URL de tu app "
-            "en dev.twitch.tv coincide exactamente con la de AlpekaBOT."
-        ) from None
+        raise PlatformError("No se pudo completar el inicio de sesión de Twitch.") from None
     finally:
         await twitch.close()
 
 
-def _stop_quietly(auth: UserAuthenticator) -> None:
-    try:
-        auth.stop()
-    except Exception:  # el servidor local puede no haber llegado a arrancar
-        log.debug("UserAuthenticator ya estaba detenido", exc_info=True)
-
-
-async def open_session(client_id: str, secret: str, role: AccountRole) -> tuple[Twitch, AccountInfo]:
+async def open_session(role: AccountRole) -> tuple[Twitch, AccountInfo]:
     """Crea un cliente de Twitch autenticado con la cuenta guardada (renueva el token si caducó)."""
-    _require_app_credentials(client_id, secret)
     data = credentials.get_json(_token_key(role))
     if not data:
         raise NotAuthorizedError(role)
 
-    twitch = await _app_client(client_id, secret)
+    twitch = await _client()
 
     async def on_refresh(access: str, refresh: str) -> None:
         log.debug("Token de %s renovado", role.value)
@@ -203,9 +275,15 @@ async def open_session(client_id: str, secret: str, role: AccountRole) -> tuple[
     except MissingScopeException as exc:
         await twitch.close()
         raise NotAuthorizedError(role, "faltan permisos nuevos") from exc
-    except (InvalidTokenException, InvalidRefreshTokenException) as exc:
+    except InvalidTokenException as exc:
         await twitch.close()
-        raise NotAuthorizedError(role, "la sesión caducó") from exc
+        # Tokens de la app antigua de cada usuario: no valen con la app compartida
+        reason = ("AlpekaBOT ahora usa su propia app de Twitch" if "client id" in str(exc).lower()
+                  else "la sesión caducó")
+        raise NotAuthorizedError(role, reason) from None
+    except (InvalidRefreshTokenException, UnauthorizedException):
+        await twitch.close()
+        raise NotAuthorizedError(role, "la sesión caducó") from None
     except TwitchAPIException as exc:
         await twitch.close()
         log.warning("Error de Twitch abriendo la sesión de %s (%s)", role.value, _safe_error(exc))

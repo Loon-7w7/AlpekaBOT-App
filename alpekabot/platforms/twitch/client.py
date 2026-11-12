@@ -61,7 +61,8 @@ class TwitchClient(PlatformClient):
 
     @property
     def is_configured(self) -> bool:
-        return bool(self._config.client_id)
+        # La app de Twitch es compartida: «configurado» = hay alguna cuenta conectada
+        return any(auth.load_account(role) is not None for role in AccountRole)
 
     @property
     def bot_user_id(self) -> str | None:
@@ -77,10 +78,8 @@ class TwitchClient(PlatformClient):
             return
         self._set_state(ConnectionState.CONNECTING)
         try:
-            secret = auth.get_client_secret()
-            cid = self._config.client_id
-            self._bot_api, self.bot = await auth.open_session(cid, secret, AccountRole.BOT)
-            self._streamer_api, self.streamer = await auth.open_session(cid, secret, AccountRole.STREAMER)
+            self._bot_api, self.bot = await auth.open_session(AccountRole.BOT)
+            self._streamer_api, self.streamer = await auth.open_session(AccountRole.STREAMER)
 
             # NO pasar callback_loop: twitchAPI llamaría a create_task() sobre el bucle de Qt
             # desde su propio hilo, y eso no es seguro (AssertionError en qasync, mensajes

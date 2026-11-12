@@ -17,9 +17,8 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class TwitchConfig:
-    client_id: str = ""
-    # Debe coincidir EXACTAMENTE con la "OAuth Redirect URL" de la app en dev.twitch.tv
-    redirect_url: str = "http://localhost:17563"
+    # La app de Twitch es compartida (platforms/twitch/auth.py:CLIENT_ID): aquí no hay credenciales.
+    # Las claves antiguas client_id / redirect_url de config.json se ignoran al cargar.
     auto_connect: bool = False
 
 
