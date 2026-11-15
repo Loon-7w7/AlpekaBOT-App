@@ -85,6 +85,44 @@ class TtsConfig:
 
 
 @dataclass
+class OverlayConfig:
+    """Overlay «Sonando ahora» para OBS (fuente de navegador servida por la app en 127.0.0.1)."""
+
+    enabled: bool = True
+    port: int = 17565             # fijo: así la URL puesta en OBS no cambia
+    # Contenido
+    header_text: str = "Sonando ahora"
+    show_header: bool = True
+    show_cover: bool = True
+    show_channel: bool = True
+    show_requester: bool = True
+    show_platform: bool = True
+    show_progress: bool = True
+    show_time: bool = True
+    # Estilo
+    width: int = 460              # px
+    font: str = "Inter"
+    font_scale: int = 100         # %
+    accent: str = "#9146ff"
+    background: str = "#11131a"
+    bg_opacity: int = 85          # %
+    text_color: str = "#ffffff"
+    subtext_color: str = "#a3a9bb"
+    radius: int = 14
+    border: bool = True
+    shadow: bool = True
+    cover_size: int = 84
+    cover_radius: int = 10
+    blur_cover: bool = True       # fondo difuminado con la portada
+    # Comportamiento
+    hide_when_idle: bool = True
+    hide_when_paused: bool = False
+    show_backup: bool = True
+    animation: str = "slide"      # slide | fade | none
+    custom_css: str = ""
+
+
+@dataclass
 class AppConfig:
     twitch: TwitchConfig = field(default_factory=TwitchConfig)
     kick: KickConfig = field(default_factory=KickConfig)
@@ -92,6 +130,7 @@ class AppConfig:
     moderation: ModerationConfig = field(default_factory=ModerationConfig)
     vtube: VTubeStudioConfig = field(default_factory=VTubeStudioConfig)
     tts: TtsConfig = field(default_factory=TtsConfig)
+    overlay: OverlayConfig = field(default_factory=OverlayConfig)
 
     @classmethod
     def load(cls) -> "AppConfig":
@@ -110,6 +149,7 @@ class AppConfig:
             moderation=_from_dict(ModerationConfig, raw.get("moderation", {})),
             vtube=_from_dict(VTubeStudioConfig, raw.get("vtube", {})),
             tts=_from_dict(TtsConfig, raw.get("tts", {})),
+            overlay=_from_dict(OverlayConfig, raw.get("overlay", {})),
         )
 
     def save(self) -> None:

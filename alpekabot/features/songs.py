@@ -10,7 +10,6 @@ import logging
 import random
 import sqlite3
 from dataclasses import dataclass, replace
-from pathlib import Path
 import asyncio
 from typing import TYPE_CHECKING, Awaitable, Callable, Protocol
 
@@ -302,7 +301,6 @@ class SongService:
         config: SongRequestConfig,
         youtube: YouTubeClient,
         save_config: Callable[[], None] = lambda: None,
-        now_playing_path: Path | None = None,
         notify: Notifier | None = None,
     ) -> None:
         self._notify = notify
@@ -312,7 +310,6 @@ class SongService:
         self.config = config
         self.youtube = youtube
         self._save_config = save_config
-        self._now_playing_path = now_playing_path
         self._player: Player | None = None
         self._current: Song | None = None
         self._from_backup = False
@@ -325,7 +322,6 @@ class SongService:
         self._backup_resume: Song | None = None  # canción del respaldo que se cortó con «anterior»
         self._errors = 0
         repo.queue_reset_playing()  # tras un reinicio, la que sonaba vuelve a ser la primera pendiente
-        self._write_now_playing()
 
     # ---------------------------------------------------------- reproductor
     def attach_player(self, player: Player) -> None:
@@ -393,7 +389,6 @@ class SongService:
                 self._player.load(song.video_id, self.config.volume)
         if song:
             log.info("🎵 Suena: %s%s", song.title, f" (pedida por {song.requested_by})" if song.requested_by else "")
-        self._write_now_playing()
         self._emit()
 
     def _advance(self, remember: bool = True) -> None:
@@ -447,16 +442,6 @@ class SongService:
             self._previous = (cur, True)
         else:
             self.repo.queue_to_front(cur.id)
-
-    def _write_now_playing(self) -> None:
-        if self._now_playing_path is None:
-            return
-        s = self._current
-        text = "" if s is None else (f"{s.title} — pedida por {s.requested_by}" if s.requested_by else s.title)
-        try:
-            self._now_playing_path.write_text(text, encoding="utf-8")
-        except OSError:
-            log.warning("No se pudo escribir %s", self._now_playing_path)
 
     # ------------------------------------------------------------- controles
     def play(self) -> None:

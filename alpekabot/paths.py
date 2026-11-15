@@ -23,7 +23,6 @@ LOG_DIR = DATA_DIR / "logs"
 UPDATE_DIR = DATA_DIR / "updates"  # instaladores descargados
 CONFIG_FILE = DATA_DIR / "config.json"
 DB_FILE = DATA_DIR / "alpekabot.db"
-NOW_PLAYING_FILE = DATA_DIR / "now_playing.txt"  # para una fuente de texto en OBS
 
 
 def ensure_dirs() -> None:

@@ -6,7 +6,7 @@ import asyncio
 import logging
 
 from PySide6.QtCore import QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QGuiApplication, QPainter
+from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -23,7 +23,6 @@ from PySide6.QtWidgets import (
 from ..core.models import Permission, Platform
 from ..features.songs import BLACKLIST_KINDS, Song, SongService, SongStatus
 from ..features.youtube import YouTubeError, format_duration
-from ..paths import NOW_PLAYING_FILE
 from . import theme as t
 from .commands_tab import ElidedLabel
 from .widgets import (
@@ -196,7 +195,7 @@ class SongsTab(QWidget):
     icon = "music"
 
     def __init__(self, service: SongService, bus, player: WebPlayer, owner_name=None, default_platform=None,
-                 parent=None) -> None:
+                 parent=None, open_overlay=None) -> None:
         super().__init__(parent)
         self.setObjectName("page")
         self.svc = service
@@ -204,6 +203,7 @@ class SongsTab(QWidget):
         self.default_platform = default_platform or (lambda: Platform.TWITCH)
         self._status: SongStatus = service.status
         self._pos = 0.0
+        self._open_overlay = open_overlay
         self._dur = 0.0
 
         # ---------------------------------------------------- acciones cabecera
@@ -261,9 +261,9 @@ class SongsTab(QWidget):
         self._vol_lbl = label(f"{service.config.volume}%", color=t.TEXT_2, size=11, mono=True)
         self._volume.valueChanged.connect(lambda v: self._vol_lbl.setText(f"{v}%"))
         self._volume.sliderReleased.connect(lambda: self.svc.set_volume(self._volume.value()))
-        obs = button("Archivo OBS", "monitor", "outlineAccent", self._copy_obs, icon_color=t.ACCENT_SOFT,
-                     tooltip=f"Copia la ruta de {NOW_PLAYING_FILE.name}: en OBS, añade «Texto (GDI+)» y "
-                             "marca «Leer desde archivo».")
+        obs = button("Overlay OBS", "monitor", "outlineAccent", self._overlay, icon_color=t.ACCENT_SOFT,
+                     tooltip="Tarjeta «Sonando ahora» con portada para OBS (Fuente de navegador): "
+                             "diseño, URL y activar/desactivar.")
         self._video_btn = icon_button("eye-off", "Mostrar el vídeo (solo para verlo; se controla con estos botones. "
                                       "Si YouTube pide aceptar las cookies, se puede responder ahí)",
                                       self._toggle_video, t.TEXT_2, 17, "iconBox")
@@ -430,9 +430,9 @@ class SongsTab(QWidget):
         self._art.setFixedSize(*((110, 110) if showing else (320, 180)))
         self._video_btn.setIcon(t.icon("eye-off" if showing else "monitor", t.TEXT_2, 17))
 
-    def _copy_obs(self) -> None:
-        QGuiApplication.clipboard().setText(str(NOW_PLAYING_FILE))
-        self._saved.setText("Ruta copiada")
+    def _overlay(self) -> None:
+        if self._open_overlay is not None:
+            self._open_overlay()
 
     def _update_rule_labels(self) -> None:
         mu, md = self._max_user.value(), self._max_dur.value()

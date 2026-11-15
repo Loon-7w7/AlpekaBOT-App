@@ -124,8 +124,7 @@ def player():
 
 @pytest.fixture
 def svc(db, bot, yt, player, tmp_path):
-    s = SongService(bot.bus, SongRepository(db, bot.bus), SongRequestConfig(), yt,
-                    now_playing_path=tmp_path / "now.txt")
+    s = SongService(bot.bus, SongRepository(db, bot.bus), SongRequestConfig(), yt)
     s.attach_player(player)
     return s
 
@@ -139,7 +138,6 @@ def test_primera_peticion_suena_ya_y_la_segunda_se_encola(svc, yt, player, tmp_p
     a, b = yt.add(video(1)), yt.add(video(2))
     assert run(svc.request(msg("!sr"), link(a))) == "@pepe 🎵 Suena ahora: Canción 1 (3:00)"
     assert player.calls[-1] == ("load", a.video_id, 50)
-    assert (tmp_path / "now.txt").read_text(encoding="utf-8") == "Canción 1 — pedida por pepe"
     assert run(svc.request(msg("!sr", user="ana", user_id="u2"), link(b))) == \
         "@ana 🎵 Añadida: Canción 2 (3:00) — posición #1"
 

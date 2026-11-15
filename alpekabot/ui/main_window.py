@@ -30,6 +30,7 @@ from .commands_tab import CommandsTab
 from .frameless import CORNER_RADIUS, FramelessHelper, WindowButtons, WindowOutline, corner_styles, is_caption_area
 from .log_panel import LogPanel, QtLogHandler
 from .moderation_tab import ModerationTab
+from .overlay_dialog import OverlayDialog
 from .settings_dialog import SettingsDialog
 from .shell import HEADER_H, NowPlayingBar, Sidebar
 from .songs_tab import SongsTab
@@ -76,7 +77,8 @@ class MainWindow(QMainWindow):
             builtin_info=lambda: {bot.tts.config.command: ("mensaje", "Lee el mensaje en voz alta (texto a voz).", "TTS")},
         )
         self.timers_page = TimersTab(bot.timers, bot.bus)
-        self.songs_page = SongsTab(bot.songs, bot.bus, self.player, self._owner_name, self._default_platform)
+        self.songs_page = SongsTab(bot.songs, bot.bus, self.player, self._owner_name, self._default_platform,
+                                   open_overlay=self.open_overlay_editor)
         self.tts_player = QtTtsPlayer(self)
         bot.tts.attach_player(self.tts_player)
         self.tts_page = TtsTab(bot.tts, bot.bus)
@@ -232,6 +234,7 @@ class MainWindow(QMainWindow):
     def on_startup(self) -> None:
         self.bot.start()
         asyncio.ensure_future(self._start_player())
+        asyncio.ensure_future(self.bot.start_overlay())
         if IS_FROZEN:  # desde el código fuente se actualiza con git
             asyncio.ensure_future(self._auto_check_updates())
         cfg = self.bot.config.twitch
@@ -242,6 +245,11 @@ class MainWindow(QMainWindow):
             self._toggle_connection()
         else:
             self.chat.add_system("Pulsa «Conectar» (arriba a la derecha) para entrar al chat.")
+
+    def open_overlay_editor(self) -> None:
+        dlg = OverlayDialog(self.bot, self)
+        dlg.setAttribute(Qt.WA_DeleteOnClose)
+        dlg.open()
 
     async def _start_player(self) -> None:
         try:
@@ -419,6 +427,7 @@ class MainWindow(QMainWindow):
             return
         self.now_bar.set_progress(pos, dur)
         self.songs_page.set_progress(pos, dur)
+        self.bot.overlay.set_progress(pos, dur)
 
     def _on_connection_state(self, platform: Platform, state: ConnectionState, detail: str) -> None:
         self.sidebar.cards[platform].set_state(state, detail)

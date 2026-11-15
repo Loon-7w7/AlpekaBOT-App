@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -18,13 +19,14 @@ from .core.models import AccountInfo, AccountRole, ConnectionState, Permission, 
 from .features.commands import CommandRepository, CommandService
 from .features.moderation import ModerationRepository, ModerationService
 from .features.reactions import ReactionRepository, ReactionService
+from .integrations.obs_overlay import OverlayServer
 from .integrations.vtube_studio import VTubeStudioClient
 from .features.songs import SongRepository, SongService
 from .features.timers import TimerRepository, TimerService
 from .features.tts import TtsService
 from .features.updater import Updater
 from .features.youtube import API_KEY_SECRET, YouTubeClient
-from .paths import DB_FILE, NOW_PLAYING_FILE, ensure_dirs
+from .paths import DATA_DIR, DB_FILE, ensure_dirs
 from .platforms.base import PlatformClient, PlatformError
 from .platforms.kick import auth as kick_auth
 from .platforms.kick.client import KickClient
@@ -33,6 +35,9 @@ from .platforms.twitch.client import TwitchClient
 from .storage.database import Database
 
 log = logging.getLogger(__name__)
+
+OVERLAY_TOKEN_SECRET = "overlay/token"
+LEGACY_NOW_PLAYING = DATA_DIR / "now_playing.txt"  # antiguo archivo para OBS (sustituido por el overlay)
 
 
 class AlpekaBot:
@@ -43,12 +48,13 @@ class AlpekaBot:
             Platform.TWITCH: TwitchClient(config.twitch, self.bus),
             Platform.KICK: KickClient(config.kick, self.bus),
         }
-        # db_path explícito = modo prueba: no se tocan data/config.json ni now_playing.txt
+        # db_path explícito = modo prueba: no se tocan data/config.json ni el keyring del overlay
         real_data = db_path is None
         if real_data:
             ensure_dirs()
             db_path = DB_FILE
             twitch_auth.cleanup_legacy_secret()  # de cuando cada usuario ponía su app de Twitch
+            LEGACY_NOW_PLAYING.unlink(missing_ok=True)  # si no, OBS seguiría enseñando una canción vieja
         self.db = Database(db_path)
         self.commands = CommandRepository(self.db, self.bus)
         self.timers = TimerRepository(self.db, self.bus)
@@ -66,7 +72,6 @@ class AlpekaBot:
             config.songs,
             YouTubeClient(lambda: credentials.get_secret(API_KEY_SECRET) or ""),
             save_config=save_config,
-            now_playing_path=NOW_PLAYING_FILE if real_data else None,
             notify=self.send_message,
         )
         self.songs.register_commands(self._command_service)
@@ -74,6 +79,11 @@ class AlpekaBot:
         self.tts.register_commands(self._command_service)
         self._save_config = save_config
         self.updater = Updater()
+
+        # Overlay «Sonando ahora» para OBS
+        self.overlay = OverlayServer(config.overlay, _overlay_token() if real_data else None)
+        self.bus.song_status.connect(self.overlay.set_status)
+        self.overlay.set_status(self.songs.status)
 
         # Fase 7: VTube Studio + reacciones a canjes y eventos
         self.vtube = VTubeStudioClient(config.vtube, self.bus.vts_status.emit)
@@ -98,6 +108,22 @@ class AlpekaBot:
         self.vtube.start()
 
     # ------------------------------------------------- VTube Studio y premios
+    async def start_overlay(self) -> bool:
+        return await self.overlay.start()
+
+    async def set_overlay(self, enabled: bool, port: int | None = None) -> bool:
+        """Activa/desactiva el overlay o cambia su puerto (lo reinicia). Devuelve si quedó escuchando."""
+        self.config.overlay.enabled = enabled
+        if port is not None:
+            self.config.overlay.port = int(port)
+        self._save_config()
+        return await self.overlay.start()
+
+    def save_overlay_style(self) -> None:
+        """Guarda el estilo y lo aplica al momento en OBS y en la vista previa."""
+        self.overlay.config_changed()
+        self._save_config()
+
     async def set_vtube(self, enabled: bool, port: int | None = None) -> None:
         self.config.vtube.enabled = enabled
         if port:
@@ -190,4 +216,18 @@ class AlpekaBot:
         except asyncio.TimeoutError:
             log.warning("Moderación: sanciones pendientes sin terminar al cerrar")
         await self.disconnect_all()
+        await self.overlay.stop()
         self.db.close()
+
+
+def _overlay_token() -> str | None:
+    """Token fijo de la URL del overlay (en keyring), para que la URL puesta en OBS no cambie."""
+    try:
+        token = credentials.get_secret(OVERLAY_TOKEN_SECRET)
+        if not token:
+            token = secrets.token_urlsafe(18)
+            credentials.set_secret(OVERLAY_TOKEN_SECRET, token)
+        return token
+    except Exception:  # noqa: BLE001 (keyring no disponible: token de esta sesión)
+        log.warning("No se pudo guardar el token del overlay: la URL de OBS cambiará al reiniciar")
+        return None
