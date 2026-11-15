@@ -132,6 +132,7 @@ class MainWindow(QMainWindow):
         self.sidebar.settings_requested.connect(self.open_settings)
         self.now_bar = NowPlayingBar()
         self.now_bar.play_pause.connect(self._toggle_play)
+        self.now_bar.previous.connect(lambda: bot.songs.previous())
         self.now_bar.skip.connect(lambda: bot.songs.skip())
         self.now_bar.stop.connect(lambda: bot.songs.stop())
         self.now_bar.volume_changed.connect(bot.songs.set_volume)

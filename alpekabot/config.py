@@ -41,6 +41,7 @@ class SongRequestConfig:
     max_duration_min: int = 10
     max_per_user: int = 3         # canciones pendientes por usuario
     volume: int = 50
+    shuffle: bool = False         # el respaldo suena en orden aleatorio (sin repetir hasta acabar la vuelta)
 
 
 DEFAULT_LINK_WHITELIST = ("twitch.tv", "clips.twitch.tv", "kick.com", "youtube.com", "youtu.be")

@@ -387,3 +387,131 @@ def test_peticion_desde_la_app_sin_limites(svc, yt, player):
         yt.add(video(2))
         run(svc.add_from_app(link(video(2)), "LoonVT", Platform.KICK))
         run(svc.add_from_app(link(video(2)), "LoonVT", Platform.KICK))
+
+
+# ------------------------------------- anterior, aleatorio, repetir, reproducir ya
+def loaded(player) -> list[str]:
+    return [c[1] for c in player.calls if c[0] == "load"]
+
+
+def test_anterior_vuelve_a_la_peticion_y_la_actual_regresa_a_la_cola(svc, yt, player):
+    a, b, c = yt.add(video(1)), yt.add(video(2)), yt.add(video(3))
+    run(svc.request(msg("!sr", user="ana", user_id="1"), link(a)))
+    run(svc.request(msg("!sr", user="beto", user_id="2"), link(b)))
+    run(svc.request(msg("!sr", user="caro", user_id="3"), link(c)))
+    assert svc.status.has_previous is False and svc.previous() is None
+    svc.skip()                                   # a → b
+    assert svc.status.has_previous is True
+    assert svc.previous().video_id == a.video_id
+    cur = svc.status.current
+    assert (cur.video_id, cur.requested_by, cur.playing) == (a.video_id, "ana", True)
+    assert [s.video_id for s in svc.repo.queue_pending()] == [b.video_id, c.video_id]
+    assert svc.status.has_previous is False      # solo se guarda una
+    player.on_ended(a.video_id)
+    assert svc.status.current.video_id == b.video_id
+
+
+def test_anterior_solo_guarda_una_cancion(svc, yt):
+    vids = [yt.add(video(n)) for n in (1, 2, 3)]
+    for i, v in enumerate(vids):
+        run(svc.request(msg("!sr", user_id=str(i)), link(v)))
+    svc.skip()
+    svc.skip()                                   # a → b → c: la anterior es b
+    assert svc.previous().video_id == vids[1].video_id
+    assert svc.previous() is None
+
+
+def test_anterior_no_guarda_canciones_rotas_ni_quitadas(svc, yt, player):
+    a, b, c = yt.add(video(1)), yt.add(video(2)), yt.add(video(3))
+    for i, v in enumerate((a, b, c)):
+        run(svc.request(msg("!sr", user_id=str(i)), link(v)))
+    player.on_error(100, a.video_id)
+    assert svc.status.has_previous is False
+    svc.remove(svc.status.current.id)            # papelera sobre la que suena
+    assert svc.status.has_previous is False
+    assert svc.status.current.video_id == c.video_id
+
+
+def test_anterior_en_el_respaldo_y_la_cortada_suena_despues(svc, player):
+    a, b, c = video(1), video(2), video(3)
+    for v in (a, b, c):
+        svc.repo.backup_add(v)
+    svc.play()
+    svc.skip()                                   # a → b
+    svc.previous()                               # vuelve a a; b se cortó
+    assert svc.status.current.video_id == a.video_id and svc.status.from_backup
+    player.on_ended(a.video_id)
+    assert svc.status.current.video_id == b.video_id
+    player.on_ended(b.video_id)
+    assert svc.status.current.video_id == c.video_id
+
+
+def test_repetir_vuelve_a_cargar_la_misma_y_saltar_sigue_funcionando(svc, yt, player):
+    a, b = yt.add(video(1)), yt.add(video(2))
+    run(svc.request(msg("!sr"), link(a)))
+    run(svc.request(msg("!sr", user_id="u2"), link(b)))
+    svc.set_repeat(True)
+    assert svc.status.repeat is True
+    player.on_ended(a.video_id)
+    player.on_ended(a.video_id)
+    assert loaded(player) == [a.video_id] * 3 and svc.status.current.video_id == a.video_id
+    svc.skip()
+    assert svc.status.current.video_id == b.video_id
+    svc.set_repeat(False)
+    player.on_ended(b.video_id)
+    assert svc.status.current is None
+
+
+def test_aleatorio_suena_todo_el_respaldo_sin_repetir(svc, player):
+    vids = [video(n) for n in range(1, 7)]
+    for v in vids:
+        svc.repo.backup_add(v)
+    svc.set_shuffle(True)
+    assert svc.status.shuffle is True and svc.config.shuffle is True
+    svc.play()
+    seen = [svc.status.current.video_id]
+    for _ in range(5):
+        player.on_ended(seen[-1])
+        seen.append(svc.status.current.video_id)
+    assert sorted(seen) == sorted(v.video_id for v in vids)
+    player.on_ended(seen[-1])                    # nueva vuelta: no repite justo la última
+    assert svc.status.current.video_id != seen[-1]
+
+
+def test_aleatorio_no_afecta_a_las_peticiones(svc, yt, player):
+    svc.repo.backup_add(video(9))
+    svc.set_shuffle(True)
+    vids = [yt.add(video(n)) for n in (1, 2, 3)]
+    for i, v in enumerate(vids):
+        run(svc.request(msg("!sr", user_id=str(i)), link(v)))
+    order = [svc.status.current.video_id]
+    for _ in range(2):
+        player.on_ended(order[-1])
+        order.append(svc.status.current.video_id)
+    assert order == [v.video_id for v in vids]
+
+
+def test_reproducir_ya_una_peticion_y_la_actual_vuelve_primera(svc, yt):
+    a, b, c = yt.add(video(1)), yt.add(video(2)), yt.add(video(3))
+    for i, v in enumerate((a, b, c)):
+        run(svc.request(msg("!sr", user_id=str(i)), link(v)))
+    target = svc.repo.queue_pending()[1]         # c
+    svc.play_now(target.id)
+    assert svc.status.current.video_id == c.video_id
+    assert [s.video_id for s in svc.repo.queue_pending()] == [a.video_id, b.video_id]
+
+
+def test_reproducir_ya_del_respaldo_y_sigue_desde_ahi(svc, yt, player):
+    vids = [video(n) for n in (1, 2, 3)]
+    for v in vids:
+        svc.repo.backup_add(v)
+    r = yt.add(video(7))
+    run(svc.request(msg("!sr"), link(r)))        # suena una petición
+    third = svc.repo.backup_list()[2]
+    svc.play_backup(svc.repo.backup_list()[1].id)
+    assert svc.status.current.video_id == vids[1].video_id and svc.status.from_backup
+    assert [s.video_id for s in svc.repo.queue_pending()] == [r.video_id]  # la petición no se pierde
+    player.on_ended(vids[1].video_id)
+    assert svc.status.current.video_id == r.video_id
+    player.on_ended(r.video_id)
+    assert svc.status.current.video_id == third.video_id

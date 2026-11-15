@@ -7,7 +7,7 @@ __pycache__/
 
 # Datos locales del bot (configuración, logs, base de datos)
 data/
-
+.claude/
 # Empaquetado (scripts/release.py)
 build/
 dist/

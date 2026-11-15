@@ -375,6 +375,8 @@ class WebPlayer(QObject):
         self._current = video_id
         self._volume = int(volume)
         if video_id in self._watch_only:
+            # Para el incrustado: si sonaba la canción anterior ahí, seguía de fondo y se oían dos a la vez
+            self._embed_js("stopVideo()")
             self._open_watch(video_id)
         else:
             self._close_watch()

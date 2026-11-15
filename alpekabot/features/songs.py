@@ -7,6 +7,7 @@ el protocolo ``Player``; aquí solo está la lógica, para poder testearla.
 from __future__ import annotations
 
 import logging
+import random
 import sqlite3
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -70,6 +71,9 @@ class SongStatus:
     paused: bool
     volume: int
     active: bool
+    shuffle: bool = False
+    repeat: bool = False
+    has_previous: bool = False
 
 
 @dataclass(frozen=True)
@@ -158,6 +162,29 @@ class SongRepository:
         with self._db.conn:
             self._db.conn.execute("UPDATE song_queue SET playing = ? WHERE id = ?", (int(playing), song_id))
         self._changed()
+
+    def queue_to_front(self, song_id: int) -> None:
+        """La deja como primera pendiente (deja de sonar y será la siguiente)."""
+        with self._db.conn:
+            self._db.conn.execute(
+                "UPDATE song_queue SET playing = 0,"
+                " position = (SELECT COALESCE(MIN(position), 1) - 1 FROM song_queue) WHERE id = ?", (song_id,),
+            )
+        self._changed()
+
+    def queue_insert_front(self, song: Song, playing: bool) -> Song:
+        """Vuelve a meter en la cabeza de la cola una petición que ya había salido (canción anterior)."""
+        platform = song.platform or Platform.TWITCH
+        with self._db.conn:
+            pos = self._db.conn.execute("SELECT COALESCE(MIN(position), 1) - 1 FROM song_queue").fetchone()[0]
+            cur = self._db.conn.execute(
+                "INSERT INTO song_queue (video_id, title, channel, duration_s, requested_by, requester_id,"
+                " platform, position, playing, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (song.video_id, song.title, song.channel, song.duration_s, song.requested_by, song.requester_id,
+                 platform.value, pos, int(playing), utc_now_iso()),
+            )
+        self._changed()
+        return replace(song, id=cur.lastrowid, platform=platform, playing=playing)
 
     def queue_reset_playing(self) -> None:
         with self._db.conn:
@@ -292,6 +319,10 @@ class SongService:
         self._paused = False
         self._active = False
         self._backup_index = 0
+        self._shuffle_played: set[int] = set()  # respaldo ya sonado en esta vuelta aleatoria
+        self._repeat = False                    # repetir la canción actual (solo en esta sesión)
+        self._previous: tuple[Song, bool] | None = None  # (canción, era del respaldo): solo una atrás
+        self._backup_resume: Song | None = None  # canción del respaldo que se cortó con «anterior»
         self._errors = 0
         repo.queue_reset_playing()  # tras un reinicio, la que sonaba vuelve a ser la primera pendiente
         self._write_now_playing()
@@ -308,7 +339,11 @@ class SongService:
         return self._current is not None and (not video_id or video_id == self._current.video_id)
 
     def _on_ended(self, video_id: str = "") -> None:
-        if self._is_current(video_id):
+        if not self._is_current(video_id):
+            return
+        if self._repeat:
+            self._set_current(self._current, self._from_backup)  # vuelve a empezar la misma
+        else:
             self._advance()
 
     def _on_playing(self, video_id: str = "") -> None:
@@ -333,7 +368,7 @@ class SongService:
             self._errors = 0
             self.stop()
             return
-        self._advance()
+        self._advance(remember=False)  # una canción rota no se guarda como «anterior»
 
     async def _safe_notify(self, platform: Platform, text: str) -> None:
         try:
@@ -343,7 +378,8 @@ class SongService:
 
     @property
     def status(self) -> SongStatus:
-        return SongStatus(self._current, self._from_backup, self._paused, self.config.volume, self._active)
+        return SongStatus(self._current, self._from_backup, self._paused, self.config.volume, self._active,
+                          self.config.shuffle, self._repeat, self._previous is not None)
 
     def _emit(self) -> None:
         self._bus.song_status.emit(self.status)
@@ -360,10 +396,16 @@ class SongService:
         self._write_now_playing()
         self._emit()
 
-    def _advance(self) -> None:
-        """Termina la canción actual y pasa a la siguiente (cola → respaldo → nada)."""
-        if self._current is not None and not self._from_backup:
-            self.repo.queue_remove(self._current.id)
+    def _advance(self, remember: bool = True) -> None:
+        """Termina la canción actual y pasa a la siguiente (cola → respaldo → nada).
+
+        ``remember``: guardarla como «anterior» (no si falló o si se quitó a propósito).
+        """
+        if self._current is not None:
+            if remember:
+                self._previous = (self._current, self._from_backup)
+            if not self._from_backup:
+                self.repo.queue_remove(self._current.id)
         pending = self.repo.queue_pending()
         if pending:
             self._active = True
@@ -371,13 +413,40 @@ class SongService:
             self.repo.queue_set_playing(nxt.id, True)
             self._set_current(replace(nxt, playing=True))
             return
-        backup = self.repo.backup_list() if self._active else []
-        if backup:
+        song = self._next_backup() if self._active else None
+        self._set_current(song, from_backup=song is not None)
+
+    def _next_backup(self) -> Song | None:
+        backup = self.repo.backup_list()
+        if not backup:
+            return None
+        resume, self._backup_resume = self._backup_resume, None
+        if resume is not None and any(s.id == resume.id for s in backup):
+            return resume  # la que se interrumpió con «anterior» vuelve antes de seguir
+        if not self.config.shuffle:
             song = backup[self._backup_index % len(backup)]
             self._backup_index += 1
-            self._set_current(song, from_backup=True)
+            return song
+        # Aleatorio sin repetir: suenan todas antes de empezar otra vuelta
+        left = [s for s in backup if s.id not in self._shuffle_played]
+        if not left:
+            self._shuffle_played.clear()
+            last = self._current.id if self._current is not None and self._from_backup else None
+            left = [s for s in backup if s.id != last] or backup  # que no se repita justo la que acaba de sonar
+        song = random.choice(left)
+        self._shuffle_played.add(song.id)
+        return song
+
+    def _interrupt_current(self) -> None:
+        """Quita la canción actual para poner otra a mano: una petición vuelve a ser la primera
+        de la cola (no se pierde) y una del respaldo queda como «anterior»."""
+        cur = self._current
+        if cur is None:
+            return
+        if self._from_backup:
+            self._previous = (cur, True)
         else:
-            self._set_current(None)
+            self.repo.queue_to_front(cur.id)
 
     def _write_now_playing(self) -> None:
         if self._now_playing_path is None:
@@ -412,6 +481,62 @@ class SongService:
         if skipped is not None:
             self._advance()
         return skipped
+
+    def previous(self) -> Song | None:
+        """Vuelve a la canción anterior (solo se guarda una). La que sonaba no se pierde:
+        una petición vuelve a ser la primera de la cola y una del respaldo suena después."""
+        if self._previous is None:
+            return None
+        (song, was_backup), self._previous = self._previous, None
+        cur = self._current
+        if cur is not None:
+            if self._from_backup:
+                self._backup_resume = cur
+            else:
+                self.repo.queue_to_front(cur.id)
+        self._active = True
+        if was_backup:
+            self._set_current(song, from_backup=True)
+        else:
+            self._set_current(self.repo.queue_insert_front(song, playing=True))
+        return song
+
+    def play_now(self, song_id: int) -> None:
+        """Reproduce ya una petición de la cola."""
+        song = next((s for s in self.repo.queue_pending() if s.id == song_id), None)
+        if song is None:
+            return
+        self._interrupt_current()
+        self._active = True
+        self.repo.queue_set_playing(song.id, True)
+        self._set_current(replace(song, playing=True))
+
+    def play_backup(self, song_id: int) -> None:
+        """Reproduce ya una canción del respaldo; luego el respaldo sigue desde ella."""
+        backup = self.repo.backup_list()
+        ids = [s.id for s in backup]
+        if song_id not in ids:
+            return
+        self._interrupt_current()
+        i = ids.index(song_id)
+        self._backup_index = i + 1
+        self._backup_resume = None
+        if self.config.shuffle:
+            self._shuffle_played.add(song_id)
+        self._active = True
+        self._set_current(backup[i], from_backup=True)
+
+    def set_shuffle(self, on: bool) -> None:
+        self.config.shuffle = bool(on)
+        self._save_config()
+        self._shuffle_played.clear()
+        if on and self._current is not None and self._from_backup:
+            self._shuffle_played.add(self._current.id)
+        self._emit()
+
+    def set_repeat(self, on: bool) -> None:
+        self._repeat = bool(on)
+        self._emit()
 
     def stop(self) -> None:
         """Detiene la música. Una petición que sonaba vuelve a la cola (primera)."""
@@ -471,14 +596,14 @@ class SongService:
 
     def remove(self, song_id: int) -> None:
         if self._current is not None and not self._from_backup and self._current.id == song_id:
-            self.skip()
+            self._advance(remember=False)  # quitada a propósito: no se guarda como «anterior»
         else:
             self.repo.queue_remove(song_id)
 
     def remove_backup(self, song_id: int) -> None:
         self._drop_from_backup(song_id)
         if self._current is not None and self._from_backup and self._current.id == song_id:
-            self._advance()
+            self._advance(remember=False)
 
     def _drop_from_backup(self, song_id: int) -> None:
         """La quita del respaldo sin que la lista, al encogerse, se salte la canción siguiente."""
@@ -486,6 +611,9 @@ class SongService:
         if song_id in ids:
             upcoming = self._backup_index % len(ids)
             self._backup_index = upcoming - 1 if ids.index(song_id) < upcoming else upcoming
+        self._shuffle_played.discard(song_id)
+        if self._backup_resume is not None and self._backup_resume.id == song_id:
+            self._backup_resume = None
         self.repo.backup_remove(song_id)
 
     # -------------------------------------------------------------- favoritos

@@ -110,3 +110,29 @@ def test_arrastrar_previsualiza_y_el_progreso_no_pisa_la_barra():
     assert sent == [pytest.approx(0.8, abs=0.01)]
     bar.set_value(0.2)
     assert bar.value == pytest.approx(0.2)
+
+
+def test_botones_anterior_aleatorio_y_repetir(page):
+    svc = page.svc
+    assert not page._prev.isEnabled()
+    svc.repo.backup_add(info(1))
+    svc.repo.backup_add(info(2))
+    svc.play()
+    svc.skip()
+    assert page._prev.isEnabled()
+    page._shuffle.click()
+    page._repeat.click()
+    assert svc.config.shuffle is True and page._status.repeat is True
+    assert "activado" in page._shuffle.toolTip()
+
+
+def test_play_en_la_fila_del_respaldo(page):
+    svc = page.svc
+    svc.repo.backup_add(info(1))
+    svc.repo.backup_add(info(2))
+    page.reload()
+    row = page._backup_list.itemAt(1).widget()
+    from PySide6.QtWidgets import QPushButton
+    play = [b for b in row.findChildren(QPushButton) if b.toolTip() == "Reproducir ya"][0]
+    play.click()
+    assert svc.status.current.video_id == info(2).video_id

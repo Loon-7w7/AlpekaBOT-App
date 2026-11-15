@@ -20,7 +20,6 @@ from .widgets import (
     icon_label,
     initials,
     label,
-    soon,
     vbox,
 )
 
@@ -223,6 +222,7 @@ class Sidebar(QFrame):
 # ============================================================ barra inferior
 class NowPlayingBar(QFrame):
     play_pause = Signal()
+    previous = Signal()
     skip = Signal()
     stop = Signal()
     volume_changed = Signal(int)
@@ -244,7 +244,7 @@ class NowPlayingBar(QFrame):
         info.setFixedWidth(430)
         info.setLayout(vbox(hbox(self._pill, self._by, None, spacing=8), self._title, spacing=4))
 
-        prev = soon(icon_button("skip-back", "", None, t.TEXT_2, 18), "canción anterior")
+        self._prev = prev = icon_button("skip-back", "Canción anterior", self.previous.emit, t.TEXT_2, 18)
         self._play = icon_button("play", "Reproducir / pausar", self.play_pause.emit, "#ffffff", 16, "playBtn")
         self._play.setFixedSize(QSize(36, 36))
         nxt = icon_button("skip-forward", "Saltar", self.skip.emit, t.TEXT_2, 18)
@@ -286,6 +286,7 @@ class NowPlayingBar(QFrame):
             self._title.setText(self._title.fontMetrics().elidedText(s.title, Qt.ElideRight, 420))
             self._title.setToolTip(s.title)
         self._play.setIcon(t.icon("pause" if s is not None and not st.paused else "play", "#ffffff", 16))
+        self._prev.setEnabled(st.has_previous)
         if not self._volume.isSliderDown():
             self._volume.setValue(st.volume)
 

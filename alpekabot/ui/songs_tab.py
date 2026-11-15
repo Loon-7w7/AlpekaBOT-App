@@ -166,7 +166,8 @@ class QueueRow(QFrame):
         set_star(self.fav_btn, favorite)
         lay = hbox(label(f"#{index}", size=14, bold=True, mono=True, color=t.ACCENT_SOFT), 4, source_box(), 6, info,
                    self.fav_btn,
-                   soon(icon_button("play", "", None, t.ACCENT_SOFT, 16, "iconBox"), "reproducir ya"),
+                   icon_button("play", "Reproducir ya (la que suena vuelve a la cola)",
+                               lambda: page.svc.play_now(song.id), t.ACCENT_SOFT, 16, "iconBox"),
                    icon_button("chevron-up", "Subir", lambda: repo.queue_move(song.id, -1), t.TEXT_2, 16),
                    icon_button("chevron-down", "Bajar", lambda: repo.queue_move(song.id, 1), t.TEXT_2, 16),
                    icon_button("trash-2", "Quitar de la cola", lambda: page.svc.remove(song.id), t.TEXT_2, 16),
@@ -240,11 +241,14 @@ class SongsTab(QWidget):
         self._play = icon_button("play", "Reproducir / pausar", self._toggle_play, "#ffffff", 20, "playBtn")
         self._play.setFixedSize(50, 50)
         self._play.setStyleSheet("border-radius: 25px;")
-        prev = soon(icon_button("skip-back", "", None, t.TEXT_2, 20), "canción anterior")
+        self._prev = icon_button("skip-back", "Canción anterior", lambda: self.svc.previous(), t.TEXT_2, 20)
         nxt = icon_button("skip-forward", "Saltar", lambda: self.svc.skip(), t.TEXT_2, 20)
         stop = icon_button("square", "Detener", lambda: self.svc.stop(), t.TEXT_2, 17)
-        shuffle = soon(icon_button("shuffle", "", None, t.TEXT_2, 18), "aleatorio")
-        repeat = soon(icon_button("repeat", "", None, t.TEXT_2, 18), "repetir")
+        self._shuffle = icon_button("shuffle", "", lambda: self.svc.set_shuffle(not self._status.shuffle),
+                                    t.TEXT_2, 18)
+        self._repeat = icon_button("repeat", "", lambda: self.svc.set_repeat(not self._status.repeat),
+                                   t.TEXT_2, 18)
+        shuffle, prev, repeat = self._shuffle, self._prev, self._repeat
         self._cur = label("00:00", color=t.TEXT_2, size=12, mono=True)
         self._bar = SeekBar()
         self._bar.seeked.connect(self._seek)
@@ -366,7 +370,8 @@ class SongsTab(QWidget):
         self._backup_list = vbox(spacing=8)
         body = vbox(
             hbox(icon_label("history", t.TEXT_2, 16), label("PLAYLIST DE RESPALDO", "sectionTitle"), None, spacing=8),
-            label("Suena en orden y en bucle cuando no hay peticiones (solo si el reproductor está en marcha).",
+            label("Suena en bucle cuando no hay peticiones (solo si el reproductor está en marcha), en orden "
+                  "o al azar con el botón de aleatorio.",
                   color=t.TEXT_2, size=12, wrap=True),
             hbox(self._backup_input, icon_button("plus", "Añadir al respaldo", self._add_backup, t.TEXT, 16, "iconBox")),
             self._backup_msg, self._backup_list,
@@ -493,6 +498,8 @@ class SongsTab(QWidget):
         for i, s in enumerate(backup, 1):
             self._backup_list.addWidget(MiniRow(initials(s.title), s.title,
                                                 f"Respaldo #{i} · {format_duration(s.duration_s)}", [
+                icon_button("play", "Reproducir ya", lambda _=False, x=s: self.svc.play_backup(x.id),
+                            t.ACCENT_SOFT, 14),
                 icon_button("chevron-up", "Subir", lambda _=False, x=s: repo.backup_move(x.id, -1), t.TEXT_3, 14),
                 icon_button("chevron-down", "Bajar", lambda _=False, x=s: repo.backup_move(x.id, 1), t.TEXT_3, 14),
                 icon_button("trash-2", "Quitar", lambda _=False, x=s: self.svc.remove_backup(x.id), t.TEXT_3, 14),
@@ -541,6 +548,11 @@ class SongsTab(QWidget):
             self._channel.setText(f"{s.channel} · {format_duration(s.duration_s)}" if s.channel
                                   else format_duration(s.duration_s))
         self._play.setIcon(t.icon("pause" if s is not None and not st.paused else "play", "#ffffff", 20))
+        self._prev.setEnabled(st.has_previous)
+        self._shuffle.setIcon(t.icon("shuffle", t.ACCENT if st.shuffle else t.TEXT_2, 18))
+        self._shuffle.setToolTip("Aleatorio en el respaldo: " + ("activado" if st.shuffle else "desactivado"))
+        self._repeat.setIcon(t.icon("repeat", t.ACCENT if st.repeat else t.TEXT_2, 18))
+        self._repeat.setToolTip("Repetir la canción actual: " + ("activado" if st.repeat else "desactivado"))
         if not self._volume.isSliderDown():
             self._volume.setValue(st.volume)
 
