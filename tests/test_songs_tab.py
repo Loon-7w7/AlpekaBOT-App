@@ -136,3 +136,29 @@ def test_play_en_la_fila_del_respaldo(page):
     play = [b for b in row.findChildren(QPushButton) if b.toolTip() == "Reproducir ya"][0]
     play.click()
     assert svc.status.current.video_id == info(2).video_id
+
+
+def test_pestanas_cola_y_respaldo_con_contadores(page):
+    svc = page.svc
+    for n in (1, 2, 3):
+        svc.repo.backup_add(info(n))
+    assert not page._queue_page.isHidden() and page._backup_page.isHidden()
+    assert "(3)" in page._tabs._buttons["backup"].text() and "(0)" in page._tabs._buttons["queue"].text()
+    page._tabs._buttons["backup"].click()
+    assert page._queue_page.isHidden() and not page._backup_page.isHidden()
+
+
+def test_buscador_y_resaltado_del_respaldo(page):
+    from alpekabot.ui.songs_tab import BackupRow
+    svc = page.svc
+    for n in (1, 2, 3):
+        svc.repo.backup_add(info(n))
+    rows = lambda: [page._backup_list.itemAt(i).widget() for i in range(page._backup_list.count())]
+    page._backup_filter.setText("canción 2")
+    assert len(rows()) == 1 and not page._backup_empty.isVisible()
+    page._backup_filter.setText("no existe")
+    assert rows() == [] and page._backup_empty.text() == "No hay coincidencias."
+    page._backup_filter.setText("")
+    svc.play_backup(svc.repo.backup_list()[1].id)
+    styled = [r for r in rows() if isinstance(r, BackupRow) and r.styleSheet()]
+    assert len(styled) == 1 and styled is not None

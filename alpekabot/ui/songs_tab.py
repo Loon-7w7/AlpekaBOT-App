@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
-from PySide6.QtCore import QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QPainter
+import shiboken6
+
+from PySide6.QtCore import QRectF, QSize, Qt, QUrl, Signal
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPixmap
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -26,6 +30,7 @@ from ..features.youtube import YouTubeError, format_duration
 from . import theme as t
 from .commands_tab import ElidedLabel
 from .widgets import (
+    ChipGroup,
     ModalDialog,
     Pill,
     SearchBox,
@@ -56,6 +61,73 @@ def source_box(text: str = "YT", color: str = t.RED, size: int = 44) -> QLabel:
     box.setStyleSheet(f"background: {t.BG_900}; border: 1px solid {t.BORDER}; border-radius: 8px; color: {color};"
                       f" font-family: '{t.MONO}'; font-weight: 700; font-size: 11px;")
     return box
+
+
+_VIDEO_ID = re.compile(r"[A-Za-z0-9_-]{11}")
+
+
+class Thumbnails:
+    """Miniaturas de YouTube para las filas (``i.ytimg.com``, sin clave). Se descargan una vez por
+    sesión; mientras llegan, o si fallan, la fila enseña las iniciales del título."""
+
+    _net: QNetworkAccessManager | None = None
+    _cache: dict[tuple[str, int], QPixmap] = {}
+    _waiting: dict[str, list[tuple[QLabel, int]]] = {}
+    _raw: dict[str, QPixmap] = {}
+
+    @classmethod
+    def label(cls, video_id: str, title: str, size: int = 44) -> QLabel:
+        box = source_box(initials(title), t.TEXT, size)
+        if not _VIDEO_ID.fullmatch(video_id or ""):
+            return box
+        if video_id in cls._raw:
+            cls._apply(box, video_id, size)
+        else:
+            first = video_id not in cls._waiting
+            cls._waiting.setdefault(video_id, []).append((box, size))
+            if first:
+                cls._fetch(video_id)
+        return box
+
+    @classmethod
+    def _fetch(cls, video_id: str) -> None:
+        if cls._net is None:
+            cls._net = QNetworkAccessManager()
+        reply = cls._net.get(QNetworkRequest(QUrl(f"https://i.ytimg.com/vi/{video_id}/mqdefault.jpg")))
+        reply.finished.connect(lambda: cls._done(video_id, reply))
+
+    @classmethod
+    def _done(cls, video_id: str, reply: QNetworkReply) -> None:
+        waiting = cls._waiting.pop(video_id, [])
+        pix = QPixmap()
+        if reply.error() == QNetworkReply.NoError and pix.loadFromData(reply.readAll()):
+            cls._raw[video_id] = pix
+            for box, size in waiting:
+                if shiboken6.isValid(box):  # la fila pudo rehacerse mientras tanto
+                    cls._apply(box, video_id, size)
+        reply.deleteLater()
+
+    @classmethod
+    def _apply(cls, box: QLabel, video_id: str, size: int) -> None:
+        key = (video_id, size)
+        if key not in cls._cache:
+            src = cls._raw[video_id]
+            side = min(src.width(), src.height())  # recorte cuadrado del centro
+            square = src.copy((src.width() - side) // 2, (src.height() - side) // 2, side, side)
+            square = square.scaled(size, size, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            out = QPixmap(size, size)
+            out.fill(Qt.transparent)
+            p = QPainter(out)
+            p.setRenderHint(QPainter.Antialiasing)
+            path = QPainterPath()
+            path.addRoundedRect(QRectF(0, 0, size, size), 8, 8)
+            p.setClipPath(path)
+            p.drawPixmap(0, 0, square)
+            p.end()
+            cls._cache[key] = out
+        box.setText("")
+        box.setStyleSheet("background: transparent; border: none;")
+        box.setPixmap(cls._cache[key])
 
 
 def eta_text(seconds: int) -> str:
@@ -163,7 +235,8 @@ class QueueRow(QFrame):
         repo = page.svc.repo
         self.fav_btn = icon_button("star", "", lambda: page.svc.toggle_favorite(song), t.TEXT_2, 16)
         set_star(self.fav_btn, favorite)
-        lay = hbox(label(f"#{index}", size=14, bold=True, mono=True, color=t.ACCENT_SOFT), 4, source_box(), 6, info,
+        lay = hbox(label(f"#{index}", size=14, bold=True, mono=True, color=t.ACCENT_SOFT), 4,
+                   Thumbnails.label(song.video_id, song.title), 6, info,
                    self.fav_btn,
                    icon_button("play", "Reproducir ya (la que suena vuelve a la cola)",
                                lambda: page.svc.play_now(song.id), t.ACCENT_SOFT, 16, "iconBox"),
@@ -175,8 +248,39 @@ class QueueRow(QFrame):
         self.setLayout(lay)
 
 
+class BackupRow(QFrame):
+    """Fila de la playlist de respaldo (misma forma que la de la cola)."""
+
+    def __init__(self, page: "SongsTab", song: Song, index: int, playing: bool) -> None:
+        super().__init__()
+        self.setObjectName("row")
+        if playing:
+            self.setStyleSheet(f"QFrame#row {{ border-color: {t.ACCENT}; background: {t.BG_800}; }}")
+        title = ElidedLabel(song.title)
+        title.setStyleSheet("font-size: 14px; font-weight: 600;")
+        title_row = hbox(title, label(format_duration(song.duration_s), color=t.TEXT_3, size=11, mono=True),
+                         spacing=8)
+        title_row.setStretchFactor(title, 1)
+        meta = hbox(label(song.channel or "YouTube", color=t.TEXT_3, size=11, mono=True), spacing=8)
+        if playing:
+            meta.addWidget(Pill("SONANDO", t.GREEN, size=9))
+        meta.addStretch(1)
+        info = QWidget()
+        info.setLayout(vbox(title_row, meta, spacing=4))
+        svc, repo = page.svc, page.svc.repo
+        lay = hbox(label(f"#{index}", size=14, bold=True, mono=True, color=t.ACCENT_SOFT), 4,
+                   Thumbnails.label(song.video_id, song.title), 6, info,
+                   icon_button("play", "Reproducir ya", lambda: svc.play_backup(song.id), t.ACCENT_SOFT, 16, "iconBox"),
+                   icon_button("chevron-up", "Subir", lambda: repo.backup_move(song.id, -1), t.TEXT_2, 16),
+                   icon_button("chevron-down", "Bajar", lambda: repo.backup_move(song.id, 1), t.TEXT_2, 16),
+                   icon_button("trash-2", "Quitar del respaldo", lambda: svc.remove_backup(song.id), t.TEXT_2, 16),
+                   spacing=8, margins=(16, 12, 14, 12))
+        lay.setStretchFactor(info, 1)
+        self.setLayout(lay)
+
+
 class MiniRow(QFrame):
-    """Fila compacta para la lista de respaldo y la lista negra."""
+    """Fila compacta para la lista negra."""
 
     def __init__(self, badge: str, title: str, subtitle: str, actions: list[QWidget]) -> None:
         super().__init__()
@@ -273,8 +377,13 @@ class SongsTab(QWidget):
         controls.setStretchFactor(self._bar, 1)
         now_card = frame("cardHi", vbox(top, frame("hline"), controls, spacing=16, margins=(24, 22, 24, 20)))
 
+        # -------------------------------------------- pestañas: cola | respaldo
+        self._tabs = ChipGroup([("Cola de reproducción", "queue", "list-music"),
+                                ("Playlist de respaldo", "backup", "history")])
+        self._tabs.set_value("queue")
+        self._tabs.changed.connect(self._show_list)
+
         # ------------------------------------------------------------- cola
-        self._pending_pill = Pill("0 pendientes", t.ACCENT_SOFT, size=11)
         self._filter = SearchBox("Filtrar en cola…")
         self._filter.setFixedWidth(220)
         self._filter.textChanged.connect(self.reload)
@@ -283,19 +392,24 @@ class SongsTab(QWidget):
         self._source.addItem(t.icon("tv", t.ACCENT), "Twitch", Platform.TWITCH)
         self._source.addItem(t.icon("zap", t.KICK), "Kick", Platform.KICK)
         self._source.currentIndexChanged.connect(self.reload)
-        queue_head = hbox(label("COLA DE REPRODUCCIÓN", "sectionTitle"), self._pending_pill, None, self._filter,
-                          self._source, spacing=12)
+        queue_head = hbox(None, self._filter, self._source, spacing=12)
         self._queue_list = vbox(spacing=10)
         self._queue_empty = label("La cola está vacía. Los viewers piden canciones con !sr <enlace o nombre>.",
                                   color=t.TEXT_3, size=13, wrap=True)
+        queue_page = QWidget()
+        queue_page.setLayout(vbox(queue_head, self._queue_list, self._queue_empty, None, spacing=12))
+        # Las dos páginas van en el mismo layout y solo se ve una (un QStackedWidget no daba
+        # a la lista la altura que necesita dentro del área con scroll)
+        self._queue_page, self._backup_page = queue_page, self._build_backup()
+        self._backup_page.hide()
         queue_col = QWidget()
-        queue_col.setLayout(vbox(queue_head, self._queue_list, self._queue_empty, None, spacing=12))
+        queue_col.setLayout(vbox(self._tabs, self._queue_page, self._backup_page, spacing=14))
 
         # ------------------------------------------------------ columna derecha
         side = QWidget()
         side.setFixedWidth(400)
-        side.setLayout(vbox(self._build_rules(), self._build_output_help(), self._build_backup(),
-                            self._build_blacklist(), None, spacing=16))
+        side.setLayout(vbox(self._build_rules(), self._build_output_help(), self._build_blacklist(), None,
+                            spacing=16))
 
         lower = hbox(queue_col, side, spacing=22)
         lower.setStretchFactor(queue_col, 1)
@@ -362,22 +476,31 @@ class SongsTab(QWidget):
             spacing=10, margins=(20, 18, 20, 18),
         ))
 
-    def _build_backup(self) -> QFrame:
+    def _show_list(self, key: str) -> None:
+        self._queue_page.setVisible(key == "queue")
+        self._backup_page.setVisible(key == "backup")
+
+    def _build_backup(self) -> QWidget:
         self._backup_input = QLineEdit()
-        self._backup_input.setPlaceholderText("Enlace de YouTube o nombre")
+        self._backup_input.setPlaceholderText("Añadir: enlace de YouTube o nombre de la canción")
         self._backup_input.returnPressed.connect(self._add_backup)
+        self._backup_filter = SearchBox("Filtrar en respaldo…")
+        self._backup_filter.setFixedWidth(220)
+        self._backup_filter.textChanged.connect(self._reload_backup)
         self._backup_msg = label("", size=11, wrap=True)
-        self._backup_list = vbox(spacing=8)
-        body = vbox(
-            hbox(icon_label("history", t.TEXT_2, 16), label("PLAYLIST DE RESPALDO", "sectionTitle"), None, spacing=8),
+        self._backup_list = vbox(spacing=10)
+        self._backup_empty = label("", color=t.TEXT_3, size=13, wrap=True)
+        page = QWidget()
+        page.setLayout(vbox(
+            hbox(self._backup_input, icon_button("plus", "Añadir al respaldo", self._add_backup, t.TEXT, 16, "iconBox"),
+                 12, self._backup_filter, spacing=8),
             label("Suena en bucle cuando no hay peticiones (solo si el reproductor está en marcha), en orden "
-                  "o al azar con el botón de aleatorio.",
-                  color=t.TEXT_2, size=12, wrap=True),
-            hbox(self._backup_input, icon_button("plus", "Añadir al respaldo", self._add_backup, t.TEXT, 16, "iconBox")),
-            self._backup_msg, self._backup_list,
-            spacing=10, margins=(20, 18, 20, 18),
-        )
-        return frame("card", body)
+                  "o al azar con el botón de aleatorio. La ★ de una petición también la añade aquí.",
+                  color=t.TEXT_3, size=12, wrap=True),
+            self._backup_msg, self._backup_list, self._backup_empty, None,
+            spacing=12,
+        ))
+        return page
 
     def _build_blacklist(self) -> QFrame:
         self._bl_kind = QComboBox()
@@ -477,13 +600,15 @@ class SongsTab(QWidget):
     def reload(self) -> None:
         repo = self.svc.repo
         pending = repo.queue_pending()
-        self._pending_pill.set(f"{len(pending)} pendientes", t.ACCENT_SOFT)
+        backup = repo.backup_list()
+        self._tabs.set_text("queue", f"Cola de reproducción ({len(pending)})")
+        self._tabs.set_text("backup", f"Playlist de respaldo ({len(backup)})")
         query = self._filter.text().strip().lower()
         source = self._source.currentData()
         cur = self._status.current
         eta = (max(0, int(self._dur - self._pos)) if self._dur else cur.duration_s) if cur else 0
         clear_layout(self._queue_list)
-        favorites = {s.video_id for s in repo.backup_list()}
+        favorites = {s.video_id for s in backup}
         shown = 0
         for i, s in enumerate(pending, 1):
             if (not query or query in s.title.lower() or query in s.requested_by.lower()) and \
@@ -492,20 +617,7 @@ class SongsTab(QWidget):
                 shown += 1
             eta += s.duration_s
         self._queue_empty.setVisible(shown == 0)
-
-        clear_layout(self._backup_list)
-        backup = repo.backup_list()
-        for i, s in enumerate(backup, 1):
-            self._backup_list.addWidget(MiniRow(initials(s.title), s.title,
-                                                f"Respaldo #{i} · {format_duration(s.duration_s)}", [
-                icon_button("play", "Reproducir ya", lambda _=False, x=s: self.svc.play_backup(x.id),
-                            t.ACCENT_SOFT, 14),
-                icon_button("chevron-up", "Subir", lambda _=False, x=s: repo.backup_move(x.id, -1), t.TEXT_3, 14),
-                icon_button("chevron-down", "Bajar", lambda _=False, x=s: repo.backup_move(x.id, 1), t.TEXT_3, 14),
-                icon_button("trash-2", "Quitar", lambda _=False, x=s: self.svc.remove_backup(x.id), t.TEXT_3, 14),
-            ]))
-        if not backup:
-            self._backup_list.addWidget(label("Vacía.", color=t.TEXT_3, size=12))
+        self._reload_backup(backup)
 
         clear_layout(self._bl_list)
         for e in repo.blacklist_list():
@@ -514,8 +626,27 @@ class SongsTab(QWidget):
             ]))
         self._update_favorite()
 
+    def _reload_backup(self, backup: list[Song] | None = None) -> None:
+        if not isinstance(backup, list):  # también llega el texto del buscador (señal textChanged)
+            backup = self.svc.repo.backup_list()
+        query = self._backup_filter.text().strip().lower()
+        st = self._status
+        playing_id = st.current.id if st.current is not None and st.from_backup else None
+        clear_layout(self._backup_list)
+        shown = 0
+        for i, s in enumerate(backup, 1):
+            if not query or query in s.title.lower() or query in s.channel.lower():
+                self._backup_list.addWidget(BackupRow(self, s, i, s.id == playing_id))
+                shown += 1
+        self._backup_empty.setText("No hay coincidencias." if backup else
+                                   "Vacía. Añade canciones arriba o con la ★ de una petición.")
+        self._backup_empty.setVisible(shown == 0)
+
     def _on_status(self, st: SongStatus) -> None:
+        old = self._status.current
         self._status = st
+        if old != st.current:
+            self._reload_backup()  # resalta la que suena
         self._update_favorite()
         s = st.current
         enabled = self.svc.config.enabled

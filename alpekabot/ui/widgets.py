@@ -120,6 +120,7 @@ def clear_layout(lay: QLayout) -> None:
     while lay.count():
         item = lay.takeAt(0)
         if item.widget() is not None:
+            item.widget().hide()  # hasta que se borre seguiría pintándose encima de las filas nuevas
             item.widget().deleteLater()
         elif item.layout() is not None:
             clear_layout(item.layout())
