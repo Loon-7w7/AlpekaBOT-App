@@ -73,11 +73,15 @@ class VTubeStudioConfig:
 class TtsConfig:
     enabled: bool = False         # apagado hasta que el streamer lo active: cualquiera podría hablar
     command: str = "tts"          # nombre del comando, sin el prefijo
-    permission: int = 0           # Permission mínimo (0 = Todos)
-    cooldown_s: int = 10          # cooldown global, como los comandos
+    mode: str = "command"         # "command" (!tts), "chat" (todo el chat) o "reward" (canje de puntos)
+    permission: int = 0           # Permission mínimo del comando (0 = Todos)
+    cooldown_s: int = 10          # cooldown POR USUARIO (comando y todo el chat)
+    # premios del modo canje, uno por plataforma: [{"platform": "twitch", "id": "...", "title": "..."}]
+    rewards: list = field(default_factory=list)
     max_chars: int = 200
     max_queue: int = 10
     read_name: bool = False       # «Pepe dice: hola»
+    skip_emotes: bool = True      # no leer los emotes de Twitch y Kick
     voice: str = "es-MX-DaliaNeural"
     rate: int = 0                 # velocidad en %, de -50 a 50
     volume: int = 100

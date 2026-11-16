@@ -81,7 +81,7 @@ class MainWindow(QMainWindow):
                                    open_overlay=self.open_overlay_editor)
         self.tts_player = QtTtsPlayer(self)
         bot.tts.attach_player(self.tts_player)
-        self.tts_page = TtsTab(bot.tts, bot.bus)
+        self.tts_page = TtsTab(bot.tts, bot.bus, bot)
         self.moderation_page = ModerationTab(bot.moderation, bot.bus)
         self.vtube_page = VTubeTab(bot)
         self.console_page = LogPanel(log_handler)

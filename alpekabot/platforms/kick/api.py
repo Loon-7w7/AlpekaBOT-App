@@ -126,8 +126,11 @@ class KickAPI:
     async def list_rewards(self, token: str) -> list[dict]:
         return (await self.request("GET", "channels/rewards", token)).get("data") or []
 
-    async def create_reward(self, token: str, title: str, cost: int, description: str = "") -> dict:
+    async def create_reward(self, token: str, title: str, cost: int, description: str = "",
+                            input_required: bool = False) -> dict:
         body: dict[str, Any] = {"title": title[:50], "cost": max(1, int(cost))}
+        if input_required:
+            body["is_user_input_required"] = True
         if description:
             body["description"] = description[:200]
         return (await self.request("POST", "channels/rewards", token, json=body)).get("data") or {}

@@ -1,15 +1,17 @@
-"""Página «Texto a voz»: comando, permisos y límites, voz, salida de audio y cola."""
+"""Página «Texto a voz»: modo (comando, todo el chat o canje), límites, voz, salida de audio y cola."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 
 from PySide6.QtCore import Qt
 from PySide6.QtMultimedia import QMediaDevices
-from PySide6.QtWidgets import QComboBox, QFrame, QLineEdit, QSlider, QSpinBox, QWidget
+from PySide6.QtWidgets import QComboBox, QFrame, QLineEdit, QMessageBox, QSlider, QSpinBox, QWidget
 
-from ..core.models import Permission
+from ..core.models import Permission, Platform, Reward
+from ..features.reactions import RewardLink
 from ..features.tts import (
     MAX_CHARS,
     MAX_COOLDOWN_S,
@@ -18,16 +20,36 @@ from ..features.tts import (
     MIN_CHARS,
     MIN_QUEUE,
     MIN_RATE,
+    MODE_CHAT,
+    MODE_COMMAND,
+    MODE_REWARD,
     SKIP_COMMAND,
     TtsItem,
     TtsService,
+    reward_links,
 )
+from ..platforms.base import PlatformError
 from . import theme as t
 from .commands_tab import ElidedLabel, scroll_page
 from .tts_player import output_devices
+from .vtube_tab import RewardDialog, RewardPicker
 from .widgets import Pill, Toggle, button, clear_layout, frame, hbox, icon_button, icon_label, label, vbox
 
 log = logging.getLogger(__name__)
+
+MODE_LABELS = {
+    MODE_COMMAND: "Comando (!tts mensaje)",
+    MODE_CHAT: "Leer todo el chat",
+    MODE_REWARD: "Canje de puntos del canal",
+}
+CHAT_WARNING = (
+    "Con este modo se lee en voz alta CUALQUIER mensaje del chat (menos los comandos !algo).\n\n"
+    "Cualquier viewer, también un troll o un raid hostil, podrá hacer hablar al bot en tu directo. "
+    "Los filtros de moderación siguen funcionando y los mods pueden callarlo con !skiptts, pero "
+    "lo que no bloqueen los filtros se oirá.\n\n¿Activar «Leer todo el chat»?"
+)
+REWARD_SUBTITLE = ("Un premio de puntos de canal para el TTS: el viewer escribe el mensaje al canjearlo. "
+                   "Si no llega a leerse, la app devuelve los puntos.")
 
 DEFAULT_TEST = "Hola, esta es una prueba del texto a voz."
 
@@ -70,10 +92,14 @@ class TtsTab(QWidget):
     title = "Texto a voz (TTS)"
     icon = "audio-lines"
 
-    def __init__(self, service: TtsService, bus, parent=None) -> None:
+    def __init__(self, service: TtsService, bus, bot=None, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("page")
         self.svc = service
+        # RewardPicker usa _bot y _repo de quien lo contiene (como el editor de reacciones)
+        self._bot = bot
+        self._repo = bot.reactions.repo if bot is not None else None
+        self._rewards_loaded = False
         self._voices_loaded = False
         cfg = service.config
 
@@ -132,20 +158,149 @@ class TtsTab(QWidget):
         self._max_queue.valueChanged.connect(lambda v: self.svc.update(max_queue=v))
         self._read_name = Toggle(cfg.read_name)
         self._read_name.toggled.connect(lambda on: self.svc.update(read_name=on))
-        return frame("card", vbox(
-            hbox(icon_label("terminal", t.ACCENT_SOFT, 16), label("COMANDO Y LÍMITES", "sectionTitle"), None, spacing=8),
+        self._skip_emotes = Toggle(cfg.skip_emotes)
+        self._skip_emotes.toggled.connect(lambda on: self.svc.update(skip_emotes=on))
+
+        self._mode = QComboBox()
+        for mode, text in MODE_LABELS.items():
+            self._mode.addItem(text, mode)
+        self._mode.setCurrentIndex(self._mode.findData(cfg.mode))
+        self._mode.currentIndexChanged.connect(self._change_mode)
+
+        self._command_box = QWidget()
+        self._command_box.setLayout(vbox(
             _field("Comando en Twitch y Kick:"), hbox(label("!", size=16, bold=True, mono=True), self._command, spacing=6),
-            self._command_msg,
-            _field("Pueden usarlo:"), self._perm,
-            hbox(vbox(_field("Cooldown global:"), self._cooldown, spacing=6),
+            self._command_msg, _field("Pueden usarlo:"), self._perm, spacing=10, margins=(0, 0, 0, 0),
+        ))
+        self._chat_warning = label("⚠ Se lee en voz alta todo el chat menos los comandos (!algo). Cualquiera puede "
+                                   "hacer hablar al bot: vigila el chat.", color=t.AMBER, size=12, wrap=True)
+        self._cooldown_box = QWidget()
+        self._cooldown_box.setLayout(vbox(_field("Cooldown por usuario:"), self._cooldown, spacing=6,
+                                          margins=(0, 0, 0, 0)))
+        return frame("card", vbox(
+            hbox(icon_label("terminal", t.ACCENT_SOFT, 16), label("MODO Y LÍMITES", "sectionTitle"), None, spacing=8),
+            _field("Qué se lee:"), self._mode, self._chat_warning,
+            self._command_box, self._build_rewards(),
+            hbox(self._cooldown_box,
                  vbox(_field("Longitud máxima:"), self._max_chars, spacing=6),
                  vbox(_field("Cola máxima:"), self._max_queue, spacing=6), spacing=12),
             hbox(_field("Leer quién lo escribió («Pepe dice: …»)"), None, self._read_name),
+            hbox(_field("No leer los emotes de Twitch y Kick"), None, self._skip_emotes),
             label(f"Los moderadores pueden saltar el mensaje con !{SKIP_COMMAND}. No se leen los enlaces, ni los "
                   "mensajes que bloquean los filtros; si sancionan a alguien, su mensaje sale de la cola.",
                   color=t.TEXT_3, size=11, wrap=True),
             spacing=10, margins=(22, 18, 22, 18),
         ))
+
+    def _build_rewards(self) -> QWidget:
+        links = reward_links(self.svc.config)
+        self.pickers: dict[Platform, RewardPicker] = {}
+        self._reward_hint = label("", color=t.TEXT_3, size=12, wrap=True)
+        self._reward_hint.setTextFormat(Qt.PlainText)  # los errores de las plataformas no son HTML
+        box = QWidget()
+        if self._bot is None:  # sin bot (pruebas): no hay plataformas que consultar
+            box.setLayout(vbox(self._reward_hint, margins=(0, 0, 0, 0)))
+            self._reward_hint.setText("Los premios no están disponibles.")
+            self._rewards_box = box
+            return box
+        for p in Platform:
+            link = links.get(p)
+            picker = RewardPicker(self, p, RewardLink(p, link["id"], link.get("title", "")) if link else None)
+            picker.combo.currentIndexChanged.connect(lambda _i, pk=picker: self._save_reward(pk))
+            self.pickers[p] = picker
+        reload_rewards = icon_button("repeat", "Volver a cargar los premios",
+                                     lambda: asyncio.ensure_future(self.load_rewards()), t.TEXT_2, 16, "iconBox")
+        hint_row = hbox(self._reward_hint, reload_rewards, spacing=8)
+        hint_row.setStretchFactor(self._reward_hint, 1)
+        box.setLayout(vbox(_field("Premio que activa el TTS:"), *self.pickers.values(), hint_row,
+                           label("Crea el premio con + para que pida el mensaje y se devuelvan los puntos si no se "
+                                 "lee (cola llena, texto vacío, sanción o fallo). Con un premio ya existente solo se "
+                                 "lee el texto; el premio debe pedir texto al viewer.", color=t.TEXT_3, size=11,
+                                 wrap=True),
+                           spacing=6, margins=(0, 0, 0, 0)))
+        self._rewards_box = box
+        return box
+
+    # ------------------------------------------------------- modo y premios
+    def _change_mode(self) -> None:
+        mode = self._mode.currentData()
+        if mode == MODE_CHAT and self.svc.config.mode != MODE_CHAT:
+            answer = QMessageBox.warning(self, "Leer todo el chat", CHAT_WARNING,
+                                         QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel)
+            if answer != QMessageBox.Yes:
+                self._mode.blockSignals(True)
+                self._mode.setCurrentIndex(self._mode.findData(self.svc.config.mode))
+                self._mode.blockSignals(False)
+                return
+        self.svc.update(mode=mode)
+        if mode == MODE_REWARD and not self._rewards_loaded:
+            asyncio.ensure_future(self.load_rewards())
+
+    def _sync_mode(self) -> None:
+        mode = self.svc.config.mode
+        self._command_box.setVisible(mode == MODE_COMMAND)
+        self._chat_warning.setVisible(mode == MODE_CHAT)
+        self._rewards_box.setVisible(mode == MODE_REWARD)
+        self._cooldown_box.setVisible(mode != MODE_REWARD)  # los premios ya tienen su cooldown en la plataforma
+
+    def _save_reward(self, picker: RewardPicker) -> None:
+        reward = picker.selected()
+        self.svc.set_reward(picker.platform, reward.id if reward else "", reward.title if reward else "")
+
+    async def load_rewards(self) -> None:
+        if self._bot is None:
+            return
+        for picker in self.pickers.values():
+            picker.set_connected(self._bot.platforms[picker.platform].is_connected)
+        if not self._bot.any_connected:
+            self._reward_hint.setText("Conecta Twitch o Kick para ver sus premios.")
+            return
+        self._reward_hint.setText("Cargando premios…")
+        try:
+            rewards, errors = await self._bot.list_rewards()
+        except Exception:
+            log.exception("Error cargando los premios")
+            rewards, errors = [], ["Error inesperado al cargar los premios (mira la consola)."]
+        self._rewards_loaded = not errors
+        for reward in rewards:
+            self.pickers[reward.platform].add(reward)
+        if errors:
+            self._reward_hint.setText(" · ".join(errors))
+        elif not any(picker.rewards for picker in self.pickers.values()):
+            self._reward_hint.setText("Todavía no hay premios: crea uno con el botón +.")
+        else:
+            self._reward_hint.setText("")
+
+    def open_reward_dialog(self, platform: Platform) -> RewardDialog:
+        dlg = RewardDialog(self._bot, platform, self, subtitle=REWARD_SUBTITLE, input_required=True)
+        dlg.title_edit.setPlaceholderText("Mensaje por TTS")
+        dlg.prompt.setPlaceholderText("Escribe lo que dirá el bot")
+        dlg.setAttribute(Qt.WA_DeleteOnClose)
+        dlg.created.connect(self._on_reward_created)
+        dlg.open()
+        return dlg
+
+    def _on_reward_created(self, reward: Reward) -> None:
+        picker = self.pickers[reward.platform]
+        picker.add(replace(reward, managed=True))
+        picker.select(reward.id)
+
+    def confirm_delete_reward(self, picker: RewardPicker) -> None:
+        reward = picker.selected()
+        if reward is None:
+            return
+        answer = QMessageBox.question(self, "Borrar premio",
+                                      f"¿Borrar el premio «{reward.title}» de {reward.platform.label}?")
+        if answer == QMessageBox.Yes:
+            asyncio.ensure_future(self._delete_reward(picker, reward))
+
+    async def _delete_reward(self, picker: RewardPicker, reward: Reward) -> None:
+        try:
+            await self._bot.delete_reward(reward.platform, reward.id)
+        except PlatformError as exc:
+            self._reward_hint.setText(str(exc))
+            return
+        picker.remove(reward.id)
 
     def _build_voice(self) -> QFrame:
         cfg = self.svc.config
@@ -247,6 +402,8 @@ class TtsTab(QWidget):
     # ---------------------------------------------------------------- voces
     def showEvent(self, event) -> None:  # noqa: N802 (Qt)
         super().showEvent(event)
+        if self.svc.config.mode == MODE_REWARD and not self._rewards_loaded:
+            asyncio.ensure_future(self.load_rewards())
         if not self._voices_loaded:  # la lista se pide a internet: solo al abrir la página
             self._voices_loaded = True
             asyncio.ensure_future(self._load_voices())
@@ -282,7 +439,11 @@ class TtsTab(QWidget):
             self._pill.set("EN ESPERA", t.ACCENT_SOFT)
         else:
             self._pill.set("DESACTIVADO", t.TEXT_3)
-        text = current.text if current else f"Los viewers lo usan con !{svc.config.command} mensaje"
+        self._sync_mode()
+        idle = {MODE_COMMAND: f"Los viewers lo usan con !{svc.config.command} mensaje",
+                MODE_CHAT: "Se lee todo el chat (menos los comandos)",
+                MODE_REWARD: "Los viewers lo usan canjeando el premio del TTS"}[svc.config.mode]
+        text = current.text if current else idle
         self._now._full = text  # noqa: SLF001 (ElidedLabel)
         self._now.setToolTip(text)
         self._now.setText(self._now.fontMetrics().elidedText(text, Qt.ElideRight, max(40, self._now.width())))

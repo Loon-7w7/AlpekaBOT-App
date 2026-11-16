@@ -15,7 +15,7 @@ from pathlib import Path
 from . import credentials
 from .config import AppConfig
 from .core.event_bus import EventBus
-from .core.models import AccountInfo, AccountRole, ConnectionState, Permission, Platform, Reward
+from .core.models import AccountInfo, AccountRole, ChatMessage, ConnectionState, Permission, Platform, Reward
 from .features.commands import CommandRepository, CommandService
 from .features.moderation import ModerationRepository, ModerationService
 from .features.reactions import ReactionRepository, ReactionService
@@ -75,7 +75,12 @@ class AlpekaBot:
             notify=self.send_message,
         )
         self.songs.register_commands(self._command_service)
-        self.tts = TtsService(self.bus, config.tts, save_config=save_config)
+        self.tts = TtsService(
+            self.bus, config.tts, save_config=save_config,
+            may_read=self._tts_may_read,
+            complete=self._complete_redemption,
+            is_managed=lambda p, reward_id: self.reactions.repo.is_managed(p, reward_id),
+        )
         self.tts.register_commands(self._command_service)
         self._save_config = save_config
         self.updater = Updater()
@@ -131,6 +136,13 @@ class AlpekaBot:
         self._save_config()
         await self.vtube.restart()
 
+    def _tts_may_read(self, msg: ChatMessage) -> bool:
+        """Modo «todo el chat»: ni lo que bloquean los filtros ni los mensajes del propio bot."""
+        client = self.platforms.get(msg.platform)
+        if client is None or msg.user_id == client.bot_user_id:
+            return False
+        return not self.moderation.is_blocked(msg)
+
     async def _complete_redemption(self, platform: Platform, reward_id: str, redemption_id: str,
                                    refund: bool) -> None:
         await self.platforms[platform].complete_redemption(reward_id, redemption_id, refund)
@@ -148,8 +160,13 @@ class AlpekaBot:
                 errors.append(f"{p.label}: {exc}")
         return rewards, errors
 
-    async def create_reward(self, platform: Platform, title: str, cost: int, prompt: str = "") -> Reward:
-        reward = await self.platforms[platform].create_reward(title, cost, prompt)
+    async def create_reward(self, platform: Platform, title: str, cost: int, prompt: str = "",
+                            input_required: bool = False) -> Reward:
+        client = self.platforms[platform]
+        if input_required:  # premio del TTS: el viewer escribe el mensaje al canjearlo
+            reward = await client.create_reward(title, cost, prompt, input_required=True)
+        else:
+            reward = await client.create_reward(title, cost, prompt)
         self.reactions.repo.add_managed_reward(platform, reward.id, reward.title)
         return reward
 

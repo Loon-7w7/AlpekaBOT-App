@@ -105,7 +105,7 @@ class PlatformClient(ABC):
         """Premios de puntos de canal del streamer (``managed`` lo rellena quien llama)."""
         raise PlatformError(f"{self.platform.label} no tiene premios")
 
-    async def create_reward(self, title: str, cost: int, prompt: str = "") -> Reward:
+    async def create_reward(self, title: str, cost: int, prompt: str = "", input_required: bool = False) -> Reward:
         raise PlatformError(f"{self.platform.label} no permite crear premios")
 
     async def delete_reward(self, reward_id: str) -> None:

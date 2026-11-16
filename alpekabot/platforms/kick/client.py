@@ -85,6 +85,7 @@ def chat_message_from_payload(p: dict) -> ChatMessage | None:
         color=identity.get("username_color") or "",
         badges=tuple(sorted(badges)),
         reply_to_id=(p.get("replies_to") or {}).get("message_id"),
+        emotes=tuple(_EMOTE_RE.findall(str(p.get("content", "")))),
     )
 
 
@@ -349,8 +350,8 @@ class KickClient(PlatformClient):
         return [Reward(Platform.KICK, str(r["id"]), str(r.get("title", "")), _int(r.get("cost")))
                 for r in data if isinstance(r, dict) and r.get("id")]
 
-    async def create_reward(self, title: str, cost: int, prompt: str = "") -> Reward:
-        r = await self._rewards("crear el premio", self._api.create_reward, title, cost, prompt)
+    async def create_reward(self, title: str, cost: int, prompt: str = "", input_required: bool = False) -> Reward:
+        r = await self._rewards("crear el premio", self._api.create_reward, title, cost, prompt, input_required)
         if not r.get("id"):
             raise PlatformError("Kick no devolvió el premio creado.")
         return Reward(Platform.KICK, str(r["id"]), str(r.get("title", title)), _int(r.get("cost"), cost), True)

@@ -757,11 +757,12 @@ class ReactionDialog(_AsyncDialog):
 class RewardDialog(_AsyncDialog):
     created = Signal(object)  # Reward
 
-    def __init__(self, bot, platform: Platform, parent=None) -> None:
-        super().__init__(f"Crear Premio en {platform.label}", "Un premio de puntos de canal gestionado por la app: si "
-                         "VTube Studio está cerrado, devuelve los puntos.", "star", parent, width=620)
+    def __init__(self, bot, platform: Platform, parent=None, subtitle: str = "", input_required: bool = False) -> None:
+        super().__init__(f"Crear Premio en {platform.label}", subtitle or "Un premio de puntos de canal gestionado "
+                         "por la app: si VTube Studio está cerrado, devuelve los puntos.", "star", parent, width=620)
         self._bot = bot
         self.platform = platform
+        self.input_required = input_required  # el viewer debe escribir un texto al canjearlo (TTS)
         self.title_edit = QLineEdit()
         self.title_edit.setMaxLength(MAX_REWARD_TITLE)
         self.title_edit.setPlaceholderText("Saludo del avatar")
@@ -794,7 +795,12 @@ class RewardDialog(_AsyncDialog):
             return
         self._create.setEnabled(False)
         try:
-            reward = await self._bot.create_reward(self.platform, title, self.cost.value(), self.prompt.text().strip())
+            prompt = self.prompt.text().strip()
+            if self.input_required:
+                reward = await self._bot.create_reward(self.platform, title, self.cost.value(), prompt,
+                                                       input_required=True)
+            else:
+                reward = await self._bot.create_reward(self.platform, title, self.cost.value(), prompt)
         except PlatformError as exc:
             self.error.setText(_escape(str(exc)))
             self.error.show()

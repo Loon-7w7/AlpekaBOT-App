@@ -66,6 +66,7 @@ class ChatMessage:
     color: str = ""
     badges: tuple[str, ...] = ()
     reply_to_id: str | None = None
+    emotes: tuple[str, ...] = ()  # nombres de los emotes de la plataforma que aparecen en el texto
     timestamp: datetime = field(default_factory=datetime.now)
 
     @property

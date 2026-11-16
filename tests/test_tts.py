@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 
 from alpekabot.config import AppConfig, TtsConfig
-from alpekabot.core.models import Permission, Platform
+from alpekabot.core.models import ChannelEvent, EventKind, Permission, Platform
 from alpekabot.features import commands as commands_module
 from alpekabot.features.commands import Command, CommandRepository, CommandService, normalize_name
 from alpekabot.features.moderation import ModAction
@@ -150,13 +151,21 @@ def test_without_read_name_only_the_message(h):
     assert h.svc.pending[0].spoken == "hola"
 
 
-def test_cooldown_is_global_and_expires(h):
+def test_cooldown_is_per_user_and_expires(h):
     h.run(msg("!tts uno"))
-    h.run(msg("!tts dos", "otro", user_id="u2"))
-    assert len(h.svc.pending) == 1
+    h.run(msg("!tts dos", "otro", user_id="u2"))  # otro viewer: sí entra en la cola
+    h.run(msg("!tts tres"))                        # el mismo viewer: espera
+    assert [i.text for i in h.svc.pending] == ["uno", "dos"]
     h.clock.advance(10)
-    h.run(msg("!tts tres", "otro", user_id="u2"))
-    assert [i.text for i in h.svc.pending] == ["uno", "tres"]
+    h.run(msg("!tts cuatro"))
+    assert [i.text for i in h.svc.pending] == ["uno", "dos", "cuatro"]
+
+
+def test_cooldown_separates_platforms(h):
+    h.bot.platforms[Platform.KICK] = FakeClient(Platform.KICK)
+    h.run(msg("!tts twitch"))
+    h.run(msg("!tts kick", platform=Platform.KICK))  # mismo id, otra plataforma
+    assert len(h.svc.pending) == 2
 
 
 def test_invalid_message_does_not_spend_cooldown(h):
@@ -572,3 +581,202 @@ def test_page_survives_voice_list_failure(h):
     asyncio.run(page._load_voices())  # noqa: SLF001
     assert page._voice.currentData() == "es-MX-DaliaNeural"  # noqa: SLF001
     assert "internet" in page._voice_msg.text()  # noqa: SLF001
+
+
+# ------------------------------------------------------- modos: todo el chat
+def test_chat_mode_reads_messages_but_not_commands(h):
+    h.svc.update(mode="chat")
+    h.bot.bus.chat_message.emit(msg("hola a todos"))
+    h.svc._on_chat(msg("!sr algo", "otro", user_id="u2"))  # noqa: SLF001 (sin pasar por los comandos)
+    assert [i.text for i in h.svc.pending] == ["hola a todos"]
+
+
+def test_chat_mode_ignores_tts_command_and_blocked(bot, db):
+    h = Harness(bot, db, mode="chat")
+    h.svc._may_read = lambda m: m.user_id != "malo"  # noqa: SLF001 (bloqueado por un filtro / el bot)
+    h.run(msg("!tts esto no"))
+    bot.bus.chat_message.emit(msg("spam", "Malo", user_id="malo"))
+    assert h.svc.pending == []
+
+
+def test_chat_mode_uses_per_user_cooldown(h):
+    h.svc.update(mode="chat")
+    h.bot.bus.chat_message.emit(msg("uno"))
+    h.bot.bus.chat_message.emit(msg("dos"))
+    h.bot.bus.chat_message.emit(msg("tres", "otro", user_id="u2"))
+    assert [i.text for i in h.svc.pending] == ["uno", "tres"]
+
+
+def test_command_mode_does_not_read_chat(h):
+    h.bot.bus.chat_message.emit(msg("hola"))
+    assert h.svc.pending == []
+
+
+def test_unknown_mode_is_rejected(h):
+    with pytest.raises(ValueError):
+        h.svc.update(mode="otro")
+
+
+def test_bad_mode_in_config_falls_back(bot, db):
+    assert Harness(bot, db, mode="raro").config.mode == "command"
+
+
+# ---------------------------------------------------------------- emotes
+def test_emotes_are_not_read(h):
+    m = msg("!tts hola Kappa que tal PogChamp")
+    m = replace(m, emotes=("Kappa", "PogChamp"))
+    h.run(m)
+    assert h.svc.pending[0].text == "hola que tal"
+
+
+def test_emotes_can_be_read_if_wanted(bot, db):
+    h = Harness(bot, db, skip_emotes=False)
+    h.run(replace(msg("!tts hola Kappa"), emotes=("Kappa",)))
+    assert h.svc.pending[0].text == "hola Kappa"
+
+
+def test_message_of_only_emotes_is_skipped(h):
+    h.svc.update(mode="chat")
+    h.bot.bus.chat_message.emit(replace(msg("LUL LUL"), emotes=("LUL",)))
+    assert h.svc.pending == []
+
+
+def test_kick_emote_codes_removed_from_rewards():
+    from alpekabot.features.tts import remove_emotes
+    assert remove_emotes("hola [emote:37226:KEKW] amigo").split() == ["hola", "amigo"]
+
+
+# ----------------------------------------------------------- modo canje
+class Redemptions:
+    def __init__(self):
+        self.calls: list[tuple[Platform, str, str, bool]] = []
+
+    async def __call__(self, platform, reward_id, redemption_id, refund):
+        self.calls.append((platform, reward_id, redemption_id, refund))
+
+
+def reward_harness(bot, db, managed=True, **cfg):
+    cfg.setdefault("mode", "reward")
+    h = Harness(bot, db, **cfg)
+    h.redemptions = Redemptions()
+    h.svc._complete = h.redemptions  # noqa: SLF001
+    h.svc._is_managed = lambda p, r: managed  # noqa: SLF001
+    h.svc.set_reward(Platform.TWITCH, "r1", "TTS")
+    return h
+
+
+def redeem(text="hola desde puntos", reward_id="r1", redemption_id="c1", platform=Platform.TWITCH):
+    return ChannelEvent(platform, EventKind.REWARD, "u1", "Pepe", 100, reward_id, "TTS", redemption_id,
+                        text, pending=True)
+
+
+def test_set_reward_saves_one_per_platform(bot, db):
+    h = reward_harness(bot, db)
+    h.svc.set_reward(Platform.KICK, "k1", "TTS Kick")
+    h.svc.set_reward(Platform.TWITCH, "r2", "Otro")
+    assert h.config.rewards == [{"platform": "twitch", "id": "r2", "title": "Otro"},
+                                {"platform": "kick", "id": "k1", "title": "TTS Kick"}]
+    h.svc.set_reward(Platform.KICK)
+    assert [r["platform"] for r in h.config.rewards] == ["twitch"]
+
+
+def test_reward_is_read_and_completed(bot, db):
+    h = reward_harness(bot, db)
+    h.svc.attach_player(FakePlayer())
+
+    async def main():
+        h.svc.start()
+        bot.bus.channel_event.emit(redeem())
+        await settle()
+        await h.svc.stop()
+
+    asyncio.run(main())
+    assert h.spoken[0][0] == "hola desde puntos"
+    assert h.redemptions.calls == [(Platform.TWITCH, "r1", "c1", False)]
+
+
+def test_other_rewards_are_ignored(bot, db):
+    h = reward_harness(bot, db)
+    bot.bus.channel_event.emit(redeem(reward_id="otro"))
+    assert h.svc.pending == []
+
+
+def test_reward_refunded_when_unreadable_full_or_off(bot, db):
+    h = reward_harness(bot, db, max_queue=1)
+
+    async def main():
+        bot.bus.channel_event.emit(redeem("???", redemption_id="vacio"))
+        bot.bus.channel_event.emit(redeem("uno", redemption_id="entra"))
+        bot.bus.channel_event.emit(redeem("dos", redemption_id="llena"))
+        h.svc.update(mode="command")
+        bot.bus.channel_event.emit(redeem("tres", redemption_id="apagado"))
+        await settle()
+
+    asyncio.run(main())
+    assert [c[2] for c in h.redemptions.calls if c[3]] == ["vacio", "llena", "apagado"]
+    assert [i.text for i in h.svc.pending] == ["uno"]
+
+
+def test_reward_refunded_when_removed_or_sanctioned(bot, db):
+    h = reward_harness(bot, db)
+
+    async def main():
+        bot.bus.channel_event.emit(redeem("uno", redemption_id="c1"))
+        bot.bus.channel_event.emit(redeem("dos", redemption_id="c2"))
+        h.svc.remove(h.svc.pending[0].id)
+        bot.bus.mod_action.emit(ModAction(Platform.TWITCH, "u1", "Pepe", "timeout"))
+        await settle()
+
+    asyncio.run(main())
+    assert h.redemptions.calls == [(Platform.TWITCH, "r1", "c1", True), (Platform.TWITCH, "r1", "c2", True)]
+
+
+def test_reward_refunded_when_speech_fails(bot, db):
+    h = reward_harness(bot, db)
+    h.svc.attach_player(FakePlayer())
+    h.fail = OSError("sin internet")
+
+    async def main():
+        h.svc.start()
+        bot.bus.channel_event.emit(redeem())
+        await settle()
+        await h.svc.stop()
+
+    asyncio.run(main())
+    assert h.redemptions.calls == [(Platform.TWITCH, "r1", "c1", True)]
+
+
+def test_skipped_reward_counts_as_read(bot, db):
+    h = reward_harness(bot, db)
+    h.svc.attach_player(FakePlayer(hold=True))
+
+    async def main():
+        h.svc.start()
+        bot.bus.channel_event.emit(redeem())
+        await settle()
+        h.svc.skip()
+        await settle()
+        await h.svc.stop()
+
+    asyncio.run(main())
+    assert h.redemptions.calls == [(Platform.TWITCH, "r1", "c1", False)]
+
+
+def test_closing_refunds_pending_rewards(bot, db):
+    h = reward_harness(bot, db)
+
+    async def main():
+        bot.bus.channel_event.emit(redeem())
+        await h.svc.stop()
+
+    asyncio.run(main())
+    assert h.redemptions.calls == [(Platform.TWITCH, "r1", "c1", True)]
+
+
+def test_unmanaged_reward_is_read_but_not_touched(bot, db):
+    h = reward_harness(bot, db, managed=False)
+    bot.bus.channel_event.emit(redeem("???"))
+    bot.bus.channel_event.emit(redeem("hola"))
+    assert [i.text for i in h.svc.pending] == ["hola"]
+    asyncio.run(h.svc.stop())
+    assert h.redemptions.calls == []

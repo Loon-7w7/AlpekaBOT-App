@@ -156,6 +156,7 @@ def test_payload_a_chat_message():
     m = chat_message_from_payload(chat_payload())
     assert m.platform is Platform.KICK and m.user_name == "Pepe" and m.user_login == "pepe"
     assert m.text == "hola KEKW !sr algo"
+    assert m.emotes == ("KEKW",)
     assert m.badges == ("moderator",) and m.color == "#FF5733" and m.reply_to_id == "m-0"
     assert m.channel_id == "100" and m.user_id == "200"
 

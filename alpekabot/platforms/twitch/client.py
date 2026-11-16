@@ -266,10 +266,11 @@ class TwitchClient(PlatformClient):
         rewards = await self._rewards_call("leer los premios", api.get_custom_reward(channel))
         return [Reward(Platform.TWITCH, r.id, r.title, r.cost) for r in rewards]
 
-    async def create_reward(self, title: str, cost: int, prompt: str = "") -> Reward:
+    async def create_reward(self, title: str, cost: int, prompt: str = "", input_required: bool = False) -> Reward:
         api, channel = self._streamer_context()
         r = await self._rewards_call("crear el premio",
-                                     api.create_custom_reward(channel, title[:45], max(1, int(cost)), prompt or None))
+                                     api.create_custom_reward(channel, title[:45], max(1, int(cost)), prompt or None,
+                                                              is_user_input_required=input_required))
         return Reward(Platform.TWITCH, r.id, r.title, r.cost, managed=True)
 
     async def delete_reward(self, reward_id: str) -> None:
@@ -369,6 +370,7 @@ class TwitchClient(PlatformClient):
             color=e.color or "",
             badges=tuple(b.set_id for b in (e.badges or [])),
             reply_to_id=e.reply.parent_message_id if e.reply else None,
+            emotes=tuple(f.text for f in (e.message.fragments or []) if f.type in ("emote", "cheermote")),
         )
         loop = self._qt_loop
         if loop is not None and not loop.is_closed():
