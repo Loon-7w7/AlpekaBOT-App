@@ -8,7 +8,7 @@ import webbrowser
 from abc import ABC, abstractmethod
 
 from ..core.event_bus import EventBus
-from ..core.models import ConnectionState, Platform, Reward, StreamInfo
+from ..core.models import Category, ConnectionState, Platform, Reward, StreamInfo
 
 log = logging.getLogger(__name__)
 
@@ -99,6 +99,15 @@ class PlatformClient(ABC):
     async def lookup_user(self, login: str) -> tuple[str, str] | None:
         """Busca un usuario por su nombre: (user_id, nombre visible) o None si no existe."""
         return None
+
+    # -------------------------------------------- título y categoría
+    async def search_categories(self, query: str, limit: int = 10) -> list[Category]:
+        """Categorías cuyo nombre se parece a ``query`` (la más parecida primero)."""
+        raise PlatformError(f"{self.platform.label} no permite buscar categorías")
+
+    async def update_stream(self, title: str | None = None, category: Category | None = None) -> None:
+        """Cambia el título y/o la categoría del canal (con la cuenta del streamer)."""
+        raise PlatformError(f"{self.platform.label} no permite cambiar el título ni la categoría")
 
     # -------------------------------------------------- premios (fase 7)
     async def list_rewards(self) -> list[Reward]:

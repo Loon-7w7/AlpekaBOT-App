@@ -32,6 +32,7 @@ from .log_panel import LogPanel, QtLogHandler
 from .moderation_tab import ModerationTab
 from .overlay_dialog import OverlayDialog
 from .settings_dialog import SettingsDialog
+from .stream_tab import StreamTab
 from .shell import HEADER_H, NowPlayingBar, Sidebar
 from .songs_tab import SongsTab
 from .timers_tab import TimersTab
@@ -47,6 +48,7 @@ log = logging.getLogger(__name__)
 SHUTDOWN_TIMEOUT_S = 10
 PROGRESS_POLL_MS = 1000
 UPDATE_CHECK_DELAY_S = 5  # deja terminar el arranque antes de consultar GitHub
+FIRST_RUN_SETTINGS_DELAY_MS = 2500  # primera vez: Configuración se abre cuando la ventana ya está lista
 
 
 class MainWindow(QMainWindow):
@@ -77,6 +79,7 @@ class MainWindow(QMainWindow):
             builtin_info=lambda: {bot.tts.config.command: ("mensaje", "Lee el mensaje en voz alta (texto a voz).", "TTS")},
             builtin_enabled=bot.builtin_enabled, set_builtin_enabled=bot.set_builtin_enabled,
         )
+        self.stream_page = StreamTab(bot)
         self.timers_page = TimersTab(bot.timers, bot.bus)
         self.songs_page = SongsTab(bot.songs, bot.bus, self.player, self._owner_name, self._default_platform,
                                    open_overlay=self.open_overlay_editor)
@@ -97,6 +100,7 @@ class MainWindow(QMainWindow):
 
         self._pages: dict[str, tuple[QWidget, str, str, QWidget | None]] = {
             "chat": (self.chat, "Chat en Vivo (Twitch + Kick)", "message-square", chat_actions),
+            "stream": (self.stream_page, StreamTab.title, StreamTab.icon, None),
             "commands": (self.commands_page, CommandsTab.title, CommandsTab.icon, self.commands_page.actions),
             "timers": (self.timers_page, TimersTab.title, TimersTab.icon, self.timers_page.actions),
             "songs": (self.songs_page, SongsTab.title, SongsTab.icon, self.songs_page.actions),
@@ -241,11 +245,20 @@ class MainWindow(QMainWindow):
         cfg = self.bot.config.twitch
         if not any(c.is_configured for c in self.bot.platforms.values()):
             self.chat.add_system("Bienvenido a AlpekaBOT. Configura Twitch o Kick en «Ajustes» para empezar.")
-            self.open_settings()
+            # Se espera a que la ventana termine de abrirse (reproductor incluido):
+            # si no, Windows la trae al frente después y la Configuración queda detrás.
+            QTimer.singleShot(FIRST_RUN_SETTINGS_DELAY_MS, self._open_first_run_settings)
         elif cfg.auto_connect:
             self._toggle_connection()
         else:
             self.chat.add_system("Pulsa «Conectar» (arriba a la derecha) para entrar al chat.")
+
+    def _open_first_run_settings(self) -> None:
+        if self._closing:
+            return
+        self.raise_()
+        self.activateWindow()
+        self.open_settings()
 
     def open_overlay_editor(self) -> None:
         dlg = OverlayDialog(self.bot, self)
@@ -300,6 +313,7 @@ class MainWindow(QMainWindow):
             self._settings.update_found.connect(self.show_update)
             self._settings.open()
         self._settings.raise_()
+        self._settings.activateWindow()
 
     def _toggle_connection(self) -> None:
         if self._busy:

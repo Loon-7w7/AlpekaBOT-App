@@ -60,6 +60,8 @@ SCOPES: dict[AccountRole, list[AuthScope]] = {
         AuthScope.MODERATOR_READ_FOLLOWERS,
         AuthScope.CHANNEL_READ_SUBSCRIPTIONS,
         AuthScope.BITS_READ,
+        # !title / !game y la página «Directo»
+        AuthScope.CHANNEL_MANAGE_BROADCAST,
     ],
 }
 

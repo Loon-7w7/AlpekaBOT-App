@@ -163,6 +163,14 @@ class Reward:
 
 
 @dataclass(frozen=True)
+class Category:
+    """Categoría (juego) de una plataforma: el ID solo vale en esa plataforma."""
+    platform: Platform
+    id: str
+    name: str
+
+
+@dataclass(frozen=True)
 class StreamInfo:
     platform: Platform
     is_live: bool = False

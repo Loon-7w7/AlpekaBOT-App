@@ -18,6 +18,7 @@ from ...core.event_bus import EventBus
 from ...core.models import (
     AccountInfo,
     AccountRole,
+    Category,
     ChannelEvent,
     ChatMessage,
     ConnectionState,
@@ -335,6 +336,40 @@ class KickClient(PlatformClient):
                 while len(self._seen_redemptions) > SEEN_REDEMPTIONS:
                     self._seen_redemptions.popitem(last=False)
             self._bus.channel_event.emit(ev)
+
+    # ------------------------------------------- título y categoría
+    async def search_categories(self, query: str, limit: int = 10) -> list[Category]:
+        self._channel_id()
+        query = query.strip()
+        if not query:
+            return []
+        try:
+            data = await self._call(AccountRole.STREAMER, self._api.search_categories, query)
+        except KickAPIError as exc:
+            raise PlatformError(f"Kick no pudo buscar la categoría: {exc}") from None
+        found = [Category(Platform.KICK, str(c["id"]), str(c.get("name", ""))) for c in data]
+        # El nombre exacto primero (la búsqueda de Kick no siempre lo pone el primero)
+        found.sort(key=lambda c: c.name.casefold() != query.casefold())
+        return found[:limit]
+
+    async def update_stream(self, title: str | None = None, category: Category | None = None) -> None:
+        self._channel_id()
+        if title is not None:
+            title = title.strip()
+            if not title:
+                raise PlatformError("El título no puede estar vacío")
+        if title is None and category is None:
+            return
+        try:
+            await self._call(AccountRole.STREAMER, self._api.update_channel, title,
+                             category.id if category else None)
+        except KickAPIError as exc:
+            hint = " Reconecta la cuenta del streamer de Kick." if exc.status in (401, 403) else ""
+            raise PlatformError(f"Kick no dejó cambiar el título o la categoría: {exc}{hint}") from None
+        try:
+            await self._refresh_stream()  # refresca lo que muestran la app y las variables
+        except Exception:
+            log.debug("Kick: no se pudo refrescar el directo tras el cambio", exc_info=True)
 
     # ------------------------------------------------ premios (fase 7)
     async def _rewards(self, what: str, fn, *args):

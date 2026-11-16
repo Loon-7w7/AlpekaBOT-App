@@ -25,6 +25,7 @@ from ...core.event_bus import EventBus
 from ...core.models import (
     AccountInfo,
     AccountRole,
+    Category,
     ChannelEvent,
     ChatMessage,
     ConnectionState,
@@ -41,6 +42,7 @@ log = logging.getLogger(__name__)
 MAX_MESSAGE_LEN = 500  # límite de Twitch por mensaje
 MAX_TIMEOUT_S = 1_209_600  # 14 días, máximo de Twitch
 MAX_REASON_LEN = 500
+MAX_TITLE_LEN = 140  # límite de Twitch para el título del directo
 STREAM_POLL_S = 60  # cada cuánto se consulta si el canal está en directo
 
 
@@ -243,6 +245,52 @@ class TwitchClient(PlatformClient):
             log.warning("Twitch: no se pudo buscar al usuario (%s)", type(exc).__name__)
             raise PlatformError("Twitch no pudo buscar a ese usuario") from None
         return (user.id, user.display_name) if user else None
+
+    # ------------------------------------------- título y categoría
+    async def search_categories(self, query: str, limit: int = 10) -> list[Category]:
+        api, _ = self._streamer_context()
+        query = query.strip()
+        if not query:
+            return []
+        found: list[Category] = []
+        try:
+            # Primero el nombre exacto (la búsqueda de Twitch no siempre lo pone el primero)
+            async for g in api.get_games(names=[query]):
+                found.append(Category(Platform.TWITCH, g.id, g.name))
+            async for c in api.search_categories(query, first=min(max(limit, 1), 100)):
+                if all(c.id != f.id for f in found):
+                    found.append(Category(Platform.TWITCH, c.id, c.name))
+                if len(found) >= limit:
+                    break
+        except TwitchAPIException as exc:
+            log.warning("Twitch: no se pudo buscar la categoría (%s)", type(exc).__name__)
+            raise PlatformError("Twitch no pudo buscar la categoría") from None
+        return found[:limit]
+
+    async def update_stream(self, title: str | None = None, category: Category | None = None) -> None:
+        api, channel = self._streamer_context()
+        if title is not None:
+            title = title.strip()
+            if not title:
+                raise PlatformError("El título no puede estar vacío")
+            if len(title) > MAX_TITLE_LEN:
+                raise PlatformError(f"El título de Twitch admite {MAX_TITLE_LEN} caracteres como máximo")
+        if title is None and category is None:
+            return
+        try:
+            await api.modify_channel_information(
+                channel, game_id=category.id if category else None, title=title)
+        except (TwitchAPIException, ValueError) as exc:
+            name = type(exc).__name__
+            log.warning("Twitch rechazó el cambio de título/categoría (%s)", name)
+            raise PlatformError(
+                f"Twitch no dejó cambiar el título o la categoría ({name}). "
+                "Si sigue pasando, reconecta la cuenta del streamer de Twitch."
+            ) from None
+        try:
+            await self._poll_stream()  # refresca lo que muestran la app y las variables
+        except Exception:
+            log.debug("Twitch: no se pudo refrescar el directo tras el cambio", exc_info=True)
 
     # ----------------------------------------------- premios (fase 7)
     def _streamer_context(self) -> tuple[Twitch, str]:

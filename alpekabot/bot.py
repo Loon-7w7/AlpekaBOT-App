@@ -22,6 +22,7 @@ from .features.reactions import ReactionRepository, ReactionService
 from .integrations.obs_overlay import OverlayServer
 from .integrations.vtube_studio import VTubeStudioClient
 from .features.songs import SongRepository, SongService
+from .features.stream_control import StreamControl
 from .features.timers import TimerRepository, TimerService
 from .features.tts import TtsService
 from .features.updater import Updater
@@ -67,6 +68,8 @@ class AlpekaBot:
             self, self.commands, disabled=config.commands.disabled_builtins, save_config=save_config
         )
         self.moderation.register_commands(self._command_service)
+        self.stream = StreamControl(self.platforms)  # título y categoría (!title, !game, página «Directo»)
+        self.stream.register_commands(self._command_service)
         self._timer_service = TimerService(self, self.timers)
         self.songs = SongService(
             self.bus,

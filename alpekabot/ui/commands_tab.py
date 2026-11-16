@@ -75,8 +75,11 @@ BUILTIN_INFO = {
     "unban": ("usuario", "Quita el ban o el timeout de un usuario.", "Moderación"),
     "permit": ("usuario", "Deja a un usuario enviar un enlace durante un minuto.", "Moderación"),
     "skiptts": ("", "Calla el mensaje del TTS que está sonando.", "TTS"),
+    "title": ("[twitch|kick] [título]", "Muestra el título del directo; los mods pueden cambiarlo.", "Directo"),
+    "game": ("[twitch|kick] [categoría]", "Muestra la categoría; los mods pueden cambiarla.", "Directo"),
 }
-_TAG_COLORS = {"SongRequest": t.AMBER, "Gestión": t.ACCENT_SOFT, "Moderación": t.ORANGE, "TTS": t.GREEN}
+_TAG_COLORS = {"SongRequest": t.AMBER, "Gestión": t.ACCENT_SOFT, "Moderación": t.ORANGE, "TTS": t.GREEN,
+               "Directo": t.ACCENT}
 
 
 def permission_pill(p: Permission) -> Pill:

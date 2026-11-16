@@ -50,14 +50,16 @@ class KickAPI:
 
     async def request(
         self, method: str, path: str, token: str | None = None, *,
-        params: Any = None, json: Any = None,
+        params: Any = None, json: Any = None, version: int = 1,
     ) -> dict:
         headers = {"Accept": "application/json"}
         if token:
             headers["Authorization"] = f"Bearer {token}"
         http = await self._http()
+        base = API_BASE if version == 1 else API_BASE.replace("/v1/", f"/v{version}/")
+        url = base + path
         try:
-            async with http.request(method, API_BASE + path, headers=headers, params=params, json=json) as r:
+            async with http.request(method, url, headers=headers, params=params, json=json) as r:
                 status = r.status
                 data = await r.json(content_type=None) if r.content_length != 0 and status != 204 else {}
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
@@ -121,6 +123,30 @@ class KickAPI:
     async def delete_subscriptions(self, token: str, ids: list[str]) -> None:
         if ids:
             await self.request("DELETE", "events/subscriptions", token, params=[("id", i) for i in ids])
+
+    # -------------------------------------------- título y categoría
+    async def search_categories(self, token: str, query: str) -> list[dict]:
+        """Búsqueda libre (v1, marcada como obsoleta) y, si falla o no da nada, por nombre (v2)."""
+        results: list[dict] = []
+        try:
+            results = (await self.request("GET", "categories", token, params={"q": query})).get("data") or []
+        except KickUnauthorized:
+            raise
+        except KickAPIError as exc:
+            log.info("Kick: la búsqueda de categorías v1 falló (%s); se prueba la v2", exc.status)
+        if not results:
+            resp = await self.request("GET", "categories", token, params={"name": query, "limit": 25}, version=2)
+            results = resp.get("data") or []
+        return [c for c in results if isinstance(c, dict) and c.get("id") is not None]
+
+    async def update_channel(self, token: str, title: str | None = None, category_id: str | None = None) -> None:
+        body: dict[str, Any] = {}
+        if title is not None:
+            body["stream_title"] = title
+        if category_id is not None:
+            body["category_id"] = _as_int(category_id)
+        if body:
+            await self.request("PATCH", "channels", token, json=body)
 
     # -------------------------------------------------- premios (fase 7)
     async def list_rewards(self, token: str) -> list[dict]:

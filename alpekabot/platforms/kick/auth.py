@@ -40,6 +40,8 @@ SCOPES: dict[AccountRole, list[str]] = {
         "moderation:ban", "moderation:chat_message:manage",
         # Fase 7: premios (leer, crear, aceptar/rechazar canjes) y kicks regalados
         "channel:rewards:read", "channel:rewards:write", "kicks:read",
+        # !title / !game y la página «Directo»
+        "channel:write",
     ],
 }
 # Permisos que tenían los tokens guardados antes de que se registraran los scopes (fase 7)

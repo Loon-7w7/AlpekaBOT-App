@@ -165,6 +165,7 @@ class Sidebar(QFrame):
         nav = vbox(spacing=4, margins=(12, 0, 12, 0))
         sections = [
             ("SECCIÓN PRINCIPAL", [("chat", "Chat en Vivo", "message-square", None),
+                                   ("stream", "Directo", "radio", None),
                                    ("commands", "Comandos", "terminal", None),
                                    ("timers", "Timers", "clock", None),
                                    ("songs", "Canciones & SR", "music", t.AMBER),
