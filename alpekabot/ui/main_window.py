@@ -75,6 +75,7 @@ class MainWindow(QMainWindow):
         self.commands_page = CommandsTab(
             bot.commands, bot.bus, lambda: bot.builtin_commands,
             builtin_info=lambda: {bot.tts.config.command: ("mensaje", "Lee el mensaje en voz alta (texto a voz).", "TTS")},
+            builtin_enabled=bot.builtin_enabled, set_builtin_enabled=bot.set_builtin_enabled,
         )
         self.timers_page = TimersTab(bot.timers, bot.bus)
         self.songs_page = SongsTab(bot.songs, bot.bus, self.player, self._owner_name, self._default_platform,

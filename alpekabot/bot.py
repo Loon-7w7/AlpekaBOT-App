@@ -63,7 +63,9 @@ class AlpekaBot:
         self.moderation = ModerationService(
             self, ModerationRepository(self.db, self.bus), config.moderation, save_config=save_config
         )
-        self._command_service = CommandService(self, self.commands)
+        self._command_service = CommandService(
+            self, self.commands, disabled=config.commands.disabled_builtins, save_config=save_config
+        )
         self.moderation.register_commands(self._command_service)
         self._timer_service = TimerService(self, self.timers)
         self.songs = SongService(
@@ -104,6 +106,12 @@ class AlpekaBot:
     @property
     def builtin_commands(self) -> list[tuple[str, Permission]]:
         return self._command_service.builtins()
+
+    def builtin_enabled(self, name: str) -> bool:
+        return self._command_service.is_enabled(name)
+
+    def set_builtin_enabled(self, name: str, enabled: bool) -> None:
+        self._command_service.set_enabled(name, enabled)
 
     def start(self) -> None:
         """Arranca los servicios en segundo plano (requiere el bucle asyncio en marcha)."""

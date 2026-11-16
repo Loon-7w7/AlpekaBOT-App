@@ -159,11 +159,16 @@ class CommandService:
         repo: CommandRepository,
         clock: Callable[[], float] = time.monotonic,
         fetch: Fetcher | None = None,
+        disabled: list[str] | None = None,
+        save_config: Callable[[], None] = lambda: None,
     ) -> None:
         self._bot = bot
         self._repo = repo
         self._clock = clock
         self._fetch = fetch
+        # Lista compartida con config.commands.disabled_builtins: se modifica en el sitio
+        self._disabled = disabled if disabled is not None else []
+        self._save_config = save_config
         self._last_used: dict[str, float] = {}
         self._handlers: dict[str, tuple[Permission, BuiltinHandler]] = {}
         self.register("addcmd", self._cmd_add, Permission.MODERATOR)
@@ -195,6 +200,22 @@ class CommandService:
         """Comandos internos registrados (nombre, permiso mínimo), para mostrarlos en la app."""
         return [(name, perm) for name, (perm, _h) in self._handlers.items()]
 
+    def is_enabled(self, name: str) -> bool:
+        """¿Está activo el comando interno? (desactivado = se ignora en el chat, el nombre sigue reservado)"""
+        return name.lower() not in self._disabled
+
+    def set_enabled(self, name: str, enabled: bool, save: bool = True) -> None:
+        name = name.lower()
+        if enabled == self.is_enabled(name):
+            return
+        if enabled:
+            self._disabled.remove(name)
+        else:
+            self._disabled.append(name)
+        if save:
+            self._save_config()
+            self._bot.bus.commands_changed.emit()
+
     def _on_message(self, msg: ChatMessage) -> None:
         moderation = getattr(self._bot, "moderation", None)
         if moderation is not None and moderation.is_blocked(msg):
@@ -220,6 +241,8 @@ class CommandService:
 
         builtin = self._handlers.get(name)
         if builtin is not None:
+            if not self.is_enabled(name):
+                return None  # desactivado por el streamer: silencio, y no cae en un personalizado
             permission, handler = builtin
             reply = await handler(msg, parts[1:]) if msg.permission >= permission else None
         else:

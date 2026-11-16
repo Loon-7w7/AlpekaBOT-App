@@ -233,8 +233,13 @@ class TtsService:
         if self._commands is not None:
             if self._commands.is_taken(name):
                 raise ValueError(f"!{name} ya es otro comando.")
-            self._commands.unregister(self.config.command)
+            old = self.config.command
+            was_enabled = self._commands.is_enabled(old)
+            self._commands.unregister(old)
             self._commands.register(name, self._cmd_tts, Permission(self.config.permission))
+            if not was_enabled:  # el interruptor de la página Comandos sigue al nuevo nombre
+                self._commands.set_enabled(old, True, save=False)
+                self._commands.set_enabled(name, False, save=False)
         self.config.command = name
         self._save_config()
         self.bus.commands_changed.emit()

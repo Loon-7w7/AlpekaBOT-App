@@ -127,6 +127,13 @@ class OverlayConfig:
 
 
 @dataclass
+class CommandsConfig:
+    # Comandos del sistema (!ban, !sr, !skiptts…) desactivados: el bot los ignora en el chat,
+    # pero el nombre sigue reservado (no se puede crear uno personalizado con ese nombre).
+    disabled_builtins: list[str] = field(default_factory=list)
+
+
+@dataclass
 class AppConfig:
     twitch: TwitchConfig = field(default_factory=TwitchConfig)
     kick: KickConfig = field(default_factory=KickConfig)
@@ -135,6 +142,7 @@ class AppConfig:
     vtube: VTubeStudioConfig = field(default_factory=VTubeStudioConfig)
     tts: TtsConfig = field(default_factory=TtsConfig)
     overlay: OverlayConfig = field(default_factory=OverlayConfig)
+    commands: CommandsConfig = field(default_factory=CommandsConfig)
 
     @classmethod
     def load(cls) -> "AppConfig":
@@ -154,6 +162,7 @@ class AppConfig:
             vtube=_from_dict(VTubeStudioConfig, raw.get("vtube", {})),
             tts=_from_dict(TtsConfig, raw.get("tts", {})),
             overlay=_from_dict(OverlayConfig, raw.get("overlay", {})),
+            commands=_from_dict(CommandsConfig, raw.get("commands", {})),
         )
 
     def save(self) -> None:

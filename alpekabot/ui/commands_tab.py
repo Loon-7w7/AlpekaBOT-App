@@ -176,11 +176,13 @@ class CommandRow(QFrame):
 
 
 class BuiltinRow(QFrame):
-    def __init__(self, name: str, permission: Permission, info: dict | None = None) -> None:
+    def __init__(self, name: str, permission: Permission, info: dict | None = None,
+                 enabled: bool = True, on_toggle=None) -> None:
         super().__init__()
         self.setObjectName("row")
         args, desc, tag = {**BUILTIN_INFO, **(info or {})}.get(name, ("", "Comando interno.", "Sistema"))
-        title = hbox(label(f"!{name}", size=16, bold=True, mono=True), spacing=8)
+        color = t.TEXT if enabled else t.TEXT_3
+        title = hbox(label(f"!{name}", size=16, bold=True, mono=True, color=color), spacing=8)
         if args:
             title.addWidget(label(args, color=t.TEXT_3, size=11, mono=True))
         title.addWidget(Pill(tag, _TAG_COLORS.get(tag, t.TEXT_2), size=10, bold=False))
@@ -188,10 +190,15 @@ class BuiltinRow(QFrame):
         left = QWidget()
         left.setFixedWidth(360)
         left.setLayout(vbox(title, platform_line(frozenset(Platform)), spacing=6))
-        meta = label("Integrado en AlpekaBOT · no se puede editar", color=t.TEXT_3, size=11, mono=True)
+        state = "" if enabled else " · desactivado: el bot lo ignora"
+        meta = label(f"Integrado en AlpekaBOT · no se puede editar{state}", color=t.TEXT_3, size=11, mono=True)
         middle = QWidget()
-        middle.setLayout(vbox(label(desc, size=14), meta, spacing=6))
-        lay = hbox(left, middle, permission_pill(permission), 10, soon(Toggle(True), "pausar comandos internos"),
+        middle.setLayout(vbox(label(desc, size=14, color=color), meta, spacing=6))
+        self.toggle = Toggle(enabled)
+        self.toggle.setToolTip("Activar / desactivar este comando en el chat")
+        if on_toggle is not None:
+            self.toggle.toggled.connect(lambda on: on_toggle(name, on))
+        lay = hbox(left, middle, permission_pill(permission), 10, self.toggle,
                    spacing=12, margins=(18, 14, 18, 14))
         lay.setStretchFactor(middle, 1)
         self.setLayout(lay)
@@ -202,11 +209,14 @@ class CommandsTab(QWidget):
     title = "Comandos (!commands)"
     icon = "terminal"
 
-    def __init__(self, repo: CommandRepository, bus, builtins=None, parent=None, builtin_info=None) -> None:
+    def __init__(self, repo: CommandRepository, bus, builtins=None, parent=None, builtin_info=None,
+                 builtin_enabled=None, set_builtin_enabled=None) -> None:
         super().__init__(parent)
         self.setObjectName("page")
         self.repo = repo
         self._builtins = builtins or (lambda: [])
+        self._builtin_enabled = builtin_enabled or (lambda _name: True)
+        self._set_builtin_enabled = set_builtin_enabled
         self._builtin_info = builtin_info or (lambda: {})  # descripción de comandos con nombre configurable
         self._commands: list[Command] = []
 
@@ -277,8 +287,9 @@ class CommandsTab(QWidget):
                   if (not query or query in c.name.lower() or query in c.response.lower()) and (c.platforms & plats)]
         system = [b for b in builtins if (not query or query in b[0]) and plats]
 
-        active = sum(1 for c in self._commands if c.enabled)
-        paused = len(self._commands) - active
+        active = (sum(1 for c in self._commands if c.enabled)
+                  + sum(1 for name, _p in builtins if self._builtin_enabled(name)))
+        paused = len(self._commands) + len(builtins) - active
         self._kind.set_text("all", f"Todos  {len(self._commands) + len(builtins)}")
         self._kind.set_text("custom", f"Personalizados  {len(self._commands)}")
         self._kind.set_text("builtin", f"Predeterminados  {len(builtins)}")
@@ -291,7 +302,8 @@ class CommandsTab(QWidget):
             self._custom_list.addWidget(CommandRow(self, c))
         clear_layout(self._builtin_list)
         for name, perm in system:
-            self._builtin_list.addWidget(BuiltinRow(name, perm, self._builtin_info()))
+            self._builtin_list.addWidget(BuiltinRow(name, perm, self._builtin_info(),
+                                                    self._builtin_enabled(name), self._set_builtin_enabled))
         self._empty.setVisible(not custom)
         self._custom_box.setVisible(kind in ("all", "custom"))
         self._builtin_box.setVisible(kind in ("all", "builtin"))

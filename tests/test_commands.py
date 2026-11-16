@@ -125,3 +125,66 @@ def test_gestion_uso_incorrecto(service):
     assert "Uso:" in run(service.handle(msg("!addcmd !solo", badges=MOD)))
     assert "Uso:" in run(service.handle(msg("!delcmd", badges=MOD)))
     assert "No existe" in run(service.handle(msg("!delcmd !fantasma", badges=MOD)))
+
+
+# ------------------------------------------------- desactivar comandos del sistema
+def test_comando_del_sistema_desactivado_se_ignora(bot, repo, clock):
+    disabled: list[str] = []
+    saved = []
+    service = CommandService(bot, repo, clock=clock, disabled=disabled, save_config=lambda: saved.append(1))
+    calls = []
+
+    async def handler(_msg, _args):
+        calls.append(1)
+        return "baneado"
+
+    service.register("ban", handler, Permission.MODERATOR)
+    mod = msg("!ban pepe", badges=("moderator",))
+    assert run(service.handle(mod)) == "baneado"
+
+    service.set_enabled("BAN", False)
+    assert disabled == ["ban"] and saved == [1] and not service.is_enabled("ban")
+    assert run(service.handle(mod)) is None and calls == [1]
+    # el nombre sigue reservado: no se puede crear uno personalizado
+    assert service.is_taken("ban")
+    with pytest.raises(ValueError):
+        normalize_name("ban")
+
+    service.set_enabled("ban", True)
+    assert disabled == [] and run(service.handle(mod)) == "baneado"
+    service.unregister("ban")  # RESERVED_NAMES es global
+
+
+def test_desactivar_no_deja_pasar_a_un_personalizado_antiguo(bot, db, clock):
+    # un comando personalizado con el mismo nombre (BD antigua) no debe responder en su lugar
+    repo = CommandRepository(db, bot.bus)
+    repo.add(Command(name="ban", response="falso", cooldown_s=0))  # antes de reservar el nombre
+    service = CommandService(bot, repo, clock=clock, disabled=["ban"])
+
+    async def handler(_msg, _args):
+        return "real"
+
+    service.register("ban", handler, Permission.MODERATOR)
+    assert run(service.handle(msg("!ban x", badges=("moderator",)))) is None
+    service.unregister("ban")
+
+
+def test_interruptor_en_la_pagina_comandos(bot, repo):
+    from PySide6.QtWidgets import QLabel
+
+    from alpekabot.ui.commands_tab import BuiltinRow, CommandsTab
+
+    disabled: list[str] = []
+    service = CommandService(bot, repo, disabled=disabled)
+    page = CommandsTab(repo, bot.bus, service.builtins,
+                       builtin_enabled=service.is_enabled, set_builtin_enabled=service.set_enabled)
+
+    def row(name):
+        return next(r for r in page.findChildren(BuiltinRow)
+                    if any(lbl.text() == f"!{name}" for lbl in r.findChildren(QLabel)) and not r.isHidden())
+
+    assert row("addcmd").toggle.isChecked()
+    row("addcmd").toggle.setChecked(False)
+    assert disabled == ["addcmd"]
+    assert not row("addcmd").toggle.isChecked()  # la página se rehízo con el estado nuevo
+    assert run(service.handle(msg("!addcmd !x hola", badges=("moderator",)))) is None

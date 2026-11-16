@@ -780,3 +780,10 @@ def test_unmanaged_reward_is_read_but_not_touched(bot, db):
     assert [i.text for i in h.svc.pending] == ["hola"]
     asyncio.run(h.svc.stop())
     assert h.redemptions.calls == []
+
+
+def test_renombrar_conserva_el_comando_desactivado(h):
+    h.commands.set_enabled("tts", False)
+    h.svc.set_command("decir")
+    assert not h.commands.is_enabled("decir") and h.commands.is_enabled("tts")
+    assert h.run(msg("!decir hola")) is None
