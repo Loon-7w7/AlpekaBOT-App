@@ -35,7 +35,7 @@ def answer(monkeypatch, button):
 
 def test_modo_comando_por_defecto(bot):
     page = TtsTab(bot.tts, bot.bus, bot)
-    assert page._mode.currentData() == "command"
+    assert [m for m, tg in page._mode_toggles.items() if tg.isChecked()] == ["command"]
     assert not page._command_box.isHidden()
     assert page._chat_warning.isHidden() and page._rewards_box.isHidden()
 
@@ -43,21 +43,29 @@ def test_modo_comando_por_defecto(bot):
 def test_todo_el_chat_pide_confirmacion(bot, monkeypatch):
     page = TtsTab(bot.tts, bot.bus, bot)
     answer(monkeypatch, QMessageBox.Cancel)
-    page._mode.setCurrentIndex(page._mode.findData("chat"))
-    assert bot.config.tts.mode == "command"
-    assert page._mode.currentData() == "command"
+    page._mode_toggles["chat"].click()
+    assert bot.config.tts.modes == ["command"]
+    assert not page._mode_toggles["chat"].isChecked()
     answer(monkeypatch, QMessageBox.Yes)
-    page._mode.setCurrentIndex(page._mode.findData("chat"))
-    assert bot.config.tts.mode == "chat"
+    page._mode_toggles["chat"].click()
+    assert bot.config.tts.modes == ["chat"]
     assert not page._chat_warning.isHidden() and page._command_box.isHidden()
+    assert not page._mode_toggles["command"].isEnabled()  # «Leer todo» va solo
+    page._mode_toggles["chat"].click()
+    assert bot.config.tts.modes == ["command"] and page._mode_toggles["command"].isEnabled()
 
 
 def test_modo_canje_elige_y_crea_premios(bot):
     async def main():
         page = TtsTab(bot.tts, bot.bus, bot)
-        page._mode.setCurrentIndex(page._mode.findData("reward"))
+        page._mode_toggles["reward"].click()
+        page._mode_toggles["command"].click()  # solo canje
         await page.load_rewards()
+        assert bot.config.tts.modes == ["reward"]
         assert not page._rewards_box.isHidden() and page._cooldown_box.isHidden()
+        assert "ningún premio" in page._mode_warn.text()
+        page._mode_toggles["reward"].click()  # el último no se apaga
+        assert bot.config.tts.modes == ["reward"] and "al menos un modo" in page._mode_msg.text()
         picker = page.pickers[Platform.TWITCH]
         picker.select("r1")
         assert bot.config.tts.rewards == [{"platform": "twitch", "id": "r1", "title": "Hablar"}]
@@ -68,6 +76,7 @@ def test_modo_canje_elige_y_crea_premios(bot):
         assert bot.config.tts.rewards[0]["id"] == "id-TTS"
         assert bot.reactions.repo.is_managed(Platform.TWITCH, "id-TTS")
         assert not picker.delete_button.isHidden()
+        assert page._mode_warn.isHidden()
 
     asyncio.run(main())
 
@@ -94,5 +103,5 @@ def test_canje_de_premio_de_la_app_se_devuelve_si_tts_apagado(bot):
 
 def test_pagina_sin_bot_no_falla(bot):
     page = TtsTab(bot.tts, bot.bus)
-    bot.tts.update(mode="reward")
+    bot.tts.set_mode("reward", True)
     assert "no están disponibles" in page._reward_hint.text()

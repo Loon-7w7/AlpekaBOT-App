@@ -1,9 +1,13 @@
-"""Texto a voz para Twitch y Kick, en uno de tres modos (``TtsConfig.mode``):
+"""Texto a voz para Twitch y Kick. Modos (``TtsConfig.modes``, se cambian con ``set_mode``):
 
 - ``command``: ``!tts mensaje`` (el nombre del comando se puede cambiar);
-- ``chat``: se lee todo el chat salvo los comandos (``!algo``);
 - ``reward``: se lee el texto de un canje de puntos. Si el premio lo creó la app, el canje se
-  completa al leerlo y se devuelven los puntos si no llega a leerse.
+  completa al leerlo y se devuelven los puntos si no llega a leerse;
+- ``chat``: se lee todo el chat salvo los comandos (``!algo``).
+
+``command`` y ``reward`` pueden ir juntos; ``chat`` va siempre solo. Los canjes no cuentan
+para la cola máxima (quien pagó puntos no se queda fuera por los ``!tts`` gratis), pero
+tienen su propio tope: ``REWARD_QUEUE_FACTOR`` veces la cola.
 
 Los mensajes entran en una cola y suenan uno tras otro. La voz la genera el servicio de
 Microsoft Edge (librería ``edge-tts``: gratis, sin clave de API, necesita internet) y el
@@ -43,7 +47,9 @@ MIN_CHARS, MAX_CHARS = 10, 500
 MIN_QUEUE, MAX_QUEUE = 1, 50
 MAX_COOLDOWN_S = 3600
 MODE_COMMAND, MODE_CHAT, MODE_REWARD = "command", "chat", "reward"
-MODES = (MODE_COMMAND, MODE_CHAT, MODE_REWARD)
+MODES = (MODE_COMMAND, MODE_REWARD, MODE_CHAT)
+SOURCE_PREVIEW = "preview"  # TtsItem.source del botón «Probar»
+REWARD_QUEUE_FACTOR = 4
 MAX_COOLDOWN_USERS = 5000
 RESOLVE_TIMEOUT_S = 5
 # Sanciones que retiran de la cola lo que ese usuario tuviera pendiente
@@ -81,6 +87,15 @@ class TtsItem:
     # canje de un premio de la app pendiente de completar o devolver
     reward_id: str = ""
     redemption_id: str = ""
+    source: str = ""  # MODE_* o SOURCE_PREVIEW: de dónde vino
+
+
+def normalize_modes(modes) -> list[str]:
+    """Limpia la lista de config.json: sin desconocidos ni repetidos, «chat» solo, nunca vacía."""
+    valid = [m for m in MODES if isinstance(modes, (list, tuple)) and m in modes]
+    if MODE_CHAT in valid:
+        return [MODE_CHAT]
+    return valid or [MODE_COMMAND]
 
 
 def reward_links(config: TtsConfig) -> dict[Platform, dict]:
@@ -188,8 +203,7 @@ class TtsService:
         self._worker: asyncio.Task | None = None
         self._speaking: asyncio.Task | None = None
         self._resolving: set[asyncio.Future] = set()
-        if self.config.mode not in MODES:
-            self.config.mode = MODE_COMMAND
+        self.config.modes = normalize_modes(self.config.modes)
         bus.mod_action.connect(self._on_mod_action)
         # Se conecta después de la moderación (creada antes): así sabe qué mensajes bloqueó
         bus.chat_message.connect(self._on_chat)
@@ -203,6 +217,14 @@ class TtsService:
     @property
     def pending(self) -> list[TtsItem]:
         return list(self._queue)
+
+    def has_mode(self, mode: str) -> bool:
+        return mode in self.config.modes
+
+    @property
+    def command_enabled(self) -> bool:
+        """El comando del TTS no está apagado en Comandos → Comandos del sistema."""
+        return self._commands is None or self._commands.is_enabled(self.config.command)
 
     def attach_player(self, player: TtsPlayer) -> None:
         self._player = player
@@ -251,10 +273,8 @@ class TtsService:
         limits = {"rate": (MIN_RATE, MAX_RATE), "volume": (0, 100), "cooldown_s": (0, MAX_COOLDOWN_S),
                   "max_chars": (MIN_CHARS, MAX_CHARS), "max_queue": (MIN_QUEUE, MAX_QUEUE)}
         for key, value in changes.items():
-            if key == "command" or not hasattr(self.config, key):
+            if key in ("command", "modes") or not hasattr(self.config, key):
                 raise ValueError(f"Ajuste desconocido: {key}")
-            if key == "mode" and value not in MODES:
-                raise ValueError(f"Modo desconocido: {value}")
             if key in limits:
                 low, high = limits[key]
                 value = max(low, min(high, int(value)))
@@ -264,6 +284,26 @@ class TtsService:
             self.bus.commands_changed.emit()
         if "volume" in changes and self._player is not None:
             self._player.set_volume(self.config.volume)
+        self._save_config()
+        self.bus.tts_changed.emit()
+
+    def set_mode(self, mode: str, on: bool) -> None:
+        """Enciende o apaga un modo. «chat» va solo: al encenderlo apaga los otros y al
+        apagarlo se vuelve a «command». Lanza ValueError con un mensaje para el usuario."""
+        if mode not in MODES:
+            raise ValueError(f"Modo desconocido: {mode}")
+        if mode == MODE_CHAT:
+            new = [MODE_CHAT] if on else [MODE_COMMAND]
+        else:
+            rest = {m for m in self.config.modes if m != MODE_CHAT}
+            new = [m for m in MODES if m in (rest | {mode} if on else rest - {mode})]
+        if not new:
+            raise ValueError("Tiene que quedar al menos un modo encendido.")
+        if new == self.config.modes:
+            return
+        self.config.modes = new
+        if MODE_CHAT not in new:  # lo que quedaba del chat ya no se lee
+            self._drop(lambda i: i.source == MODE_CHAT)
         self._save_config()
         self.bus.tts_changed.emit()
 
@@ -295,7 +335,7 @@ class TtsService:
     # ------------------------------------------------------------- entradas
     async def _cmd_tts(self, msg: ChatMessage, args: list[str]) -> str | None:
         cfg = self.config
-        if not cfg.enabled or cfg.mode != MODE_COMMAND:
+        if not cfg.enabled or not self.has_mode(MODE_COMMAND):
             return None
         if self._cooling(msg.platform, msg.user_id):
             return None
@@ -304,25 +344,25 @@ class TtsService:
         text = clean_text(remove_emotes(raw, msg.emotes) if cfg.skip_emotes else raw, cfg.max_chars)
         if not text:
             return f"{at} Uso: {PREFIX}{cfg.command} mensaje"
-        if len(self._queue) >= cfg.max_queue:
+        if self._queue_full():
             return f"{at} La cola del TTS está llena, prueba en un rato."
         self._mark_used(msg.platform, msg.user_id)
-        self._enqueue(text, msg.user_name, msg.user_id, msg.platform)
+        self._enqueue(text, msg.user_name, msg.user_id, msg.platform, source=MODE_COMMAND)
         return None
 
     def _on_chat(self, msg: ChatMessage) -> None:
         """Modo «todo el chat»: cualquier mensaje que no sea un comando."""
         cfg = self.config
-        if not cfg.enabled or cfg.mode != MODE_CHAT or msg.text.lstrip().startswith(PREFIX):
+        if not cfg.enabled or not self.has_mode(MODE_CHAT) or msg.text.lstrip().startswith(PREFIX):
             return
         if not self._may_read(msg) or self._cooling(msg.platform, msg.user_id):
             return  # bloqueado por un filtro, del propio bot o en cooldown
         raw = remove_emotes(msg.text, msg.emotes) if cfg.skip_emotes else msg.text
         text = clean_text(raw, cfg.max_chars)
-        if not text or len(self._queue) >= cfg.max_queue:
+        if not text or self._queue_full():
             return  # en el chat no se responde: sería spam
         self._mark_used(msg.platform, msg.user_id)
-        self._enqueue(text, msg.user_name, msg.user_id, msg.platform)
+        self._enqueue(text, msg.user_name, msg.user_id, msg.platform, source=MODE_CHAT)
 
     def _on_channel_event(self, ev: ChannelEvent) -> None:
         """Modo canje: el texto que el viewer escribió al canjear el premio."""
@@ -334,9 +374,11 @@ class TtsService:
         cfg = self.config
         managed = ev.pending and bool(ev.redemption_id) and self._is_managed(ev.platform, ev.reward_id)
         text = clean_text(remove_emotes(ev.user_input) if cfg.skip_emotes else ev.user_input, cfg.max_chars)
-        reason = ("el TTS está desactivado" if not cfg.enabled or cfg.mode != MODE_REWARD
+        reason = ("el TTS está desactivado" if not cfg.enabled
+                  else "el modo canje está apagado" if not self.has_mode(MODE_REWARD)
                   else "el mensaje no tiene nada legible" if not text
-                  else "la cola está llena" if len(self._queue) >= cfg.max_queue else "")
+                  else "hay demasiados canjes en cola"
+                  if self._count(MODE_REWARD) >= cfg.max_queue * REWARD_QUEUE_FACTOR else "")
         if reason:
             log.info("TTS: no se lee el canje de %s: %s%s", ev.user_name or "alguien", reason,
                      "; se devuelven los puntos" if managed else "")
@@ -344,18 +386,25 @@ class TtsService:
                 self._resolve(ev.platform, ev.reward_id, ev.redemption_id, refund=True)
             return
         self._enqueue(text, ev.user_name, ev.user_id, ev.platform,
-                      ev.reward_id if managed else "", ev.redemption_id if managed else "")
+                      ev.reward_id if managed else "", ev.redemption_id if managed else "", MODE_REWARD)
 
     async def _cmd_skip(self, _msg: ChatMessage, _args: list[str]) -> str | None:
         self.skip()
         return None
 
     # ------------------------------------------------------------- cola
+    def _count(self, source: str) -> int:
+        return sum(1 for i in self._queue if i.source == source)
+
+    def _queue_full(self) -> bool:
+        """Cola máxima para !tts y el chat: los canjes no cuentan (tienen su propio tope)."""
+        return len(self._queue) - self._count(MODE_REWARD) >= self.config.max_queue
+
     def _enqueue(self, text: str, user_name: str = "", user_id: str = "", platform: Platform | None = None,
-                 reward_id: str = "", redemption_id: str = "") -> None:
+                 reward_id: str = "", redemption_id: str = "", source: str = "") -> None:
         spoken = _spoken(text, user_name, self.config.read_name)
         self._queue.append(TtsItem(self._next_id, text, spoken, user_name, user_id, platform,
-                                   reward_id, redemption_id))
+                                   reward_id, redemption_id, source))
         self._next_id += 1
         if self._wake is not None:
             self._wake.set()
@@ -365,7 +414,7 @@ class TtsService:
         """Botón «Probar» de la app: no exige que el TTS esté activado ni aplica el cooldown."""
         text = clean_text(text, self.config.max_chars)
         if text:
-            self._enqueue(text)
+            self._enqueue(text, source=SOURCE_PREVIEW)
         return bool(text)
 
     def skip(self) -> None:

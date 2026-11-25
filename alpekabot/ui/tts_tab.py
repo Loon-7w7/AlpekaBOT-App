@@ -1,4 +1,4 @@
-"""Página «Texto a voz»: modo (comando, todo el chat o canje), límites, voz, salida de audio y cola."""
+"""Página «Texto a voz»: modos (comando y canje, o todo el chat), límites, voz, salida de audio y cola."""
 
 from __future__ import annotations
 
@@ -37,10 +37,10 @@ from .widgets import Pill, Toggle, button, clear_layout, frame, hbox, icon_butto
 
 log = logging.getLogger(__name__)
 
-MODE_LABELS = {
-    MODE_COMMAND: "Comando (!tts mensaje)",
-    MODE_CHAT: "Leer todo el chat",
+MODE_LABELS = {  # en este orden se muestran los interruptores
+    MODE_COMMAND: "Comando (!{command} mensaje)",
     MODE_REWARD: "Canje de puntos del canal",
+    MODE_CHAT: "Leer todo el chat (va solo)",
 }
 CHAT_WARNING = (
     "Con este modo se lee en voz alta CUALQUIER mensaje del chat (menos los comandos !algo).\n\n"
@@ -122,6 +122,7 @@ class TtsTab(QWidget):
         self._devices.audioOutputsChanged.connect(self._fill_devices)
         self._fill_devices()
         bus.tts_changed.connect(self.reload)
+        bus.commands_changed.connect(self.reload)  # el aviso de !tts apagado en Comandos
         self.reload()
 
     # ------------------------------------------------------------- tarjetas
@@ -161,11 +162,18 @@ class TtsTab(QWidget):
         self._skip_emotes = Toggle(cfg.skip_emotes)
         self._skip_emotes.toggled.connect(lambda on: self.svc.update(skip_emotes=on))
 
-        self._mode = QComboBox()
+        self._mode_toggles: dict[str, Toggle] = {}
+        self._mode_labels: dict[str, QWidget] = {}
+        mode_rows = []
         for mode, text in MODE_LABELS.items():
-            self._mode.addItem(text, mode)
-        self._mode.setCurrentIndex(self._mode.findData(cfg.mode))
-        self._mode.currentIndexChanged.connect(self._change_mode)
+            toggle = Toggle(self.svc.has_mode(mode))
+            toggle.toggled.connect(lambda on, m=mode: self._change_mode(m, on))
+            self._mode_toggles[mode] = toggle
+            self._mode_labels[mode] = _field(text.format(command=cfg.command))
+            mode_rows.append(hbox(self._mode_labels[mode], None, toggle))
+        self._mode_msg = label("", color=t.RED, size=11, wrap=True)
+        self._mode_warn = label("", color=t.AMBER, size=12, wrap=True)
+        self._mode_warn.setTextFormat(Qt.PlainText)
 
         self._command_box = QWidget()
         self._command_box.setLayout(vbox(
@@ -179,7 +187,7 @@ class TtsTab(QWidget):
                                           margins=(0, 0, 0, 0)))
         return frame("card", vbox(
             hbox(icon_label("terminal", t.ACCENT_SOFT, 16), label("MODO Y LÍMITES", "sectionTitle"), None, spacing=8),
-            _field("Qué se lee:"), self._mode, self._chat_warning,
+            _field("Qué se lee:"), *mode_rows, self._mode_msg, self._mode_warn, self._chat_warning,
             self._command_box, self._build_rewards(),
             hbox(self._cooldown_box,
                  vbox(_field("Longitud máxima:"), self._max_chars, spacing=6),
@@ -214,34 +222,52 @@ class TtsTab(QWidget):
         hint_row.setStretchFactor(self._reward_hint, 1)
         box.setLayout(vbox(_field("Premio que activa el TTS:"), *self.pickers.values(), hint_row,
                            label("Crea el premio con + para que pida el mensaje y se devuelvan los puntos si no se "
-                                 "lee (cola llena, texto vacío, sanción o fallo). Con un premio ya existente solo se "
-                                 "lee el texto; el premio debe pedir texto al viewer.", color=t.TEXT_3, size=11,
-                                 wrap=True),
+                                 "lee (texto vacío, sanción, fallo o demasiados canjes en cola). Los canjes no "
+                                 "cuentan para la cola máxima. Con un premio ya existente solo se lee el texto; "
+                                 "el premio debe pedir texto al viewer.", color=t.TEXT_3, size=11, wrap=True),
                            spacing=6, margins=(0, 0, 0, 0)))
         self._rewards_box = box
         return box
 
     # ------------------------------------------------------- modo y premios
-    def _change_mode(self) -> None:
-        mode = self._mode.currentData()
-        if mode == MODE_CHAT and self.svc.config.mode != MODE_CHAT:
+    def _change_mode(self, mode: str, on: bool) -> None:
+        if mode == MODE_CHAT and on:
             answer = QMessageBox.warning(self, "Leer todo el chat", CHAT_WARNING,
                                          QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel)
             if answer != QMessageBox.Yes:
-                self._mode.blockSignals(True)
-                self._mode.setCurrentIndex(self._mode.findData(self.svc.config.mode))
-                self._mode.blockSignals(False)
+                self._sync_mode()  # el interruptor vuelve a como estaba
                 return
-        self.svc.update(mode=mode)
-        if mode == MODE_REWARD and not self._rewards_loaded:
-            asyncio.ensure_future(self.load_rewards())
+        try:
+            self.svc.set_mode(mode, on)
+        except ValueError as exc:
+            self._mode_msg.setText(str(exc))
+        else:
+            self._mode_msg.setText("")
+            if mode == MODE_REWARD and on and not self._rewards_loaded:
+                asyncio.ensure_future(self.load_rewards())
+        self._sync_mode()
 
     def _sync_mode(self) -> None:
-        mode = self.svc.config.mode
-        self._command_box.setVisible(mode == MODE_COMMAND)
-        self._chat_warning.setVisible(mode == MODE_CHAT)
-        self._rewards_box.setVisible(mode == MODE_REWARD)
-        self._cooldown_box.setVisible(mode != MODE_REWARD)  # los premios ya tienen su cooldown en la plataforma
+        svc, cfg = self.svc, self.svc.config
+        chat = svc.has_mode(MODE_CHAT)
+        for mode, toggle in self._mode_toggles.items():
+            toggle.blockSignals(True)
+            toggle.setChecked(svc.has_mode(mode))
+            toggle.blockSignals(False)
+            toggle.setEnabled(mode == MODE_CHAT or not chat)  # «Leer todo» va solo
+        self._mode_labels[MODE_COMMAND].setText(MODE_LABELS[MODE_COMMAND].format(command=cfg.command))
+        self._command_box.setVisible(svc.has_mode(MODE_COMMAND))
+        self._chat_warning.setVisible(chat)
+        self._rewards_box.setVisible(svc.has_mode(MODE_REWARD))
+        # los premios ya tienen su cooldown en la plataforma
+        self._cooldown_box.setVisible(not svc.has_mode(MODE_REWARD) or svc.has_mode(MODE_COMMAND))
+        warnings = []
+        if svc.has_mode(MODE_REWARD) and not reward_links(cfg):
+            warnings.append("⚠ El modo canje está encendido, pero no hay ningún premio elegido.")
+        if svc.has_mode(MODE_COMMAND) and not svc.command_enabled:
+            warnings.append(f"⚠ !{cfg.command} está apagado en Comandos → Comandos del sistema: nadie podrá usarlo.")
+        self._mode_warn.setText("\n".join(warnings))
+        self._mode_warn.setVisible(bool(warnings))
 
     def _save_reward(self, picker: RewardPicker) -> None:
         reward = picker.selected()
@@ -402,7 +428,7 @@ class TtsTab(QWidget):
     # ---------------------------------------------------------------- voces
     def showEvent(self, event) -> None:  # noqa: N802 (Qt)
         super().showEvent(event)
-        if self.svc.config.mode == MODE_REWARD and not self._rewards_loaded:
+        if self.svc.has_mode(MODE_REWARD) and not self._rewards_loaded:
             asyncio.ensure_future(self.load_rewards())
         if not self._voices_loaded:  # la lista se pide a internet: solo al abrir la página
             self._voices_loaded = True
@@ -440,9 +466,11 @@ class TtsTab(QWidget):
         else:
             self._pill.set("DESACTIVADO", t.TEXT_3)
         self._sync_mode()
-        idle = {MODE_COMMAND: f"Los viewers lo usan con !{svc.config.command} mensaje",
-                MODE_CHAT: "Se lee todo el chat (menos los comandos)",
-                MODE_REWARD: "Los viewers lo usan canjeando el premio del TTS"}[svc.config.mode]
+        if svc.has_mode(MODE_CHAT):
+            idle = "Se lee todo el chat (menos los comandos)"
+        else:
+            ways = {MODE_COMMAND: f"con !{svc.config.command} mensaje", MODE_REWARD: "canjeando el premio del TTS"}
+            idle = "Los viewers lo usan " + " o ".join(w for m, w in ways.items() if svc.has_mode(m))
         text = current.text if current else idle
         self._now._full = text  # noqa: SLF001 (ElidedLabel)
         self._now.setToolTip(text)

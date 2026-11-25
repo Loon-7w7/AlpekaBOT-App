@@ -73,7 +73,9 @@ class VTubeStudioConfig:
 class TtsConfig:
     enabled: bool = False         # apagado hasta que el streamer lo active: cualquiera podría hablar
     command: str = "tts"          # nombre del comando, sin el prefijo
-    mode: str = "command"         # "command" (!tts), "chat" (todo el chat) o "reward" (canje de puntos)
+    # modos activos: "command" (!tts) y "reward" (canje) se combinan; "chat" (todo el chat) va solo.
+    # Solo se cambian con TtsService.set_mode
+    modes: list = field(default_factory=lambda: ["command"])
     permission: int = 0           # Permission mínimo del comando (0 = Todos)
     cooldown_s: int = 10          # cooldown POR USUARIO (comando y todo el chat)
     # premios del modo canje, uno por plataforma: [{"platform": "twitch", "id": "...", "title": "..."}]
@@ -160,7 +162,7 @@ class AppConfig:
             songs=_from_dict(SongRequestConfig, raw.get("songs", {})),
             moderation=_from_dict(ModerationConfig, raw.get("moderation", {})),
             vtube=_from_dict(VTubeStudioConfig, raw.get("vtube", {})),
-            tts=_from_dict(TtsConfig, raw.get("tts", {})),
+            tts=_from_dict(TtsConfig, _migrate_tts(raw.get("tts", {}))),
             overlay=_from_dict(OverlayConfig, raw.get("overlay", {})),
             commands=_from_dict(CommandsConfig, raw.get("commands", {})),
         )
@@ -170,6 +172,13 @@ class AppConfig:
         tmp = CONFIG_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps(asdict(self), indent=2, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, CONFIG_FILE)  # escritura atómica
+
+
+def _migrate_tts(data: dict) -> dict:
+    """Hasta la 1.3.1 había un solo modo (``mode``); ahora es una lista (``modes``)."""
+    if isinstance(data, dict) and "modes" not in data and isinstance(data.get("mode"), str):
+        return {**data, "modes": [data["mode"]]}
+    return data
 
 
 def _from_dict(cls, data: dict):

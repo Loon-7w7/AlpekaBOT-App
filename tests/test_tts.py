@@ -585,14 +585,14 @@ def test_page_survives_voice_list_failure(h):
 
 # ------------------------------------------------------- modos: todo el chat
 def test_chat_mode_reads_messages_but_not_commands(h):
-    h.svc.update(mode="chat")
+    h.svc.set_mode("chat", True)
     h.bot.bus.chat_message.emit(msg("hola a todos"))
     h.svc._on_chat(msg("!sr algo", "otro", user_id="u2"))  # noqa: SLF001 (sin pasar por los comandos)
     assert [i.text for i in h.svc.pending] == ["hola a todos"]
 
 
 def test_chat_mode_ignores_tts_command_and_blocked(bot, db):
-    h = Harness(bot, db, mode="chat")
+    h = Harness(bot, db, modes=["chat"])
     h.svc._may_read = lambda m: m.user_id != "malo"  # noqa: SLF001 (bloqueado por un filtro / el bot)
     h.run(msg("!tts esto no"))
     bot.bus.chat_message.emit(msg("spam", "Malo", user_id="malo"))
@@ -600,7 +600,7 @@ def test_chat_mode_ignores_tts_command_and_blocked(bot, db):
 
 
 def test_chat_mode_uses_per_user_cooldown(h):
-    h.svc.update(mode="chat")
+    h.svc.set_mode("chat", True)
     h.bot.bus.chat_message.emit(msg("uno"))
     h.bot.bus.chat_message.emit(msg("dos"))
     h.bot.bus.chat_message.emit(msg("tres", "otro", user_id="u2"))
@@ -614,11 +614,36 @@ def test_command_mode_does_not_read_chat(h):
 
 def test_unknown_mode_is_rejected(h):
     with pytest.raises(ValueError):
-        h.svc.update(mode="otro")
+        h.svc.set_mode("otro", True)
 
 
 def test_bad_mode_in_config_falls_back(bot, db):
-    assert Harness(bot, db, mode="raro").config.mode == "command"
+    assert Harness(bot, db, modes=["raro"]).config.modes == ["command"]
+
+
+def test_modes_combine_chat_goes_alone_and_rewards_skip_the_queue(bot, db):
+    h = reward_harness(bot, db, max_queue=1, modes=["command"])
+    h.svc.set_mode("reward", True)
+    assert h.config.modes == ["command", "reward"]
+    bot.bus.channel_event.emit(redeem("canje", redemption_id="c1"))
+    h.run(msg("!tts gratis"))  # el canje no ocupa la cola de !tts
+    assert [i.source for i in h.svc.pending] == ["reward", "command"]
+    h.svc.set_mode("chat", True)
+    assert h.config.modes == ["chat"]
+    bot.bus.chat_message.emit(msg("del chat", "otro", user_id="u2"))
+    h.svc.set_mode("chat", False)  # se vuelve a «command» y sale lo del chat
+    assert h.config.modes == ["command"]
+    assert "chat" not in [i.source for i in h.svc.pending]
+    with pytest.raises(ValueError):
+        h.svc.set_mode("command", False)  # nunca queda vacío
+    with pytest.raises(ValueError):
+        h.svc.update(modes=["chat"])  # solo con set_mode
+
+
+def test_old_single_mode_config_is_migrated():
+    from alpekabot.config import _migrate_tts
+    assert _migrate_tts({"mode": "reward"})["modes"] == ["reward"]
+    assert _migrate_tts({"modes": ["command"], "mode": "chat"})["modes"] == ["command"]
 
 
 # ---------------------------------------------------------------- emotes
@@ -636,7 +661,7 @@ def test_emotes_can_be_read_if_wanted(bot, db):
 
 
 def test_message_of_only_emotes_is_skipped(h):
-    h.svc.update(mode="chat")
+    h.svc.set_mode("chat", True)
     h.bot.bus.chat_message.emit(replace(msg("LUL LUL"), emotes=("LUL",)))
     assert h.svc.pending == []
 
@@ -656,7 +681,7 @@ class Redemptions:
 
 
 def reward_harness(bot, db, managed=True, **cfg):
-    cfg.setdefault("mode", "reward")
+    cfg.setdefault("modes", ["reward"])
     h = Harness(bot, db, **cfg)
     h.redemptions = Redemptions()
     h.svc._complete = h.redemptions  # noqa: SLF001
@@ -706,15 +731,17 @@ def test_reward_refunded_when_unreadable_full_or_off(bot, db):
 
     async def main():
         bot.bus.channel_event.emit(redeem("???", redemption_id="vacio"))
-        bot.bus.channel_event.emit(redeem("uno", redemption_id="entra"))
+        for n in range(4):  # tope de canjes: max_queue (1) x REWARD_QUEUE_FACTOR (4)
+            bot.bus.channel_event.emit(redeem(f"canje {n}", redemption_id=f"entra{n}"))
         bot.bus.channel_event.emit(redeem("dos", redemption_id="llena"))
-        h.svc.update(mode="command")
+        h.svc.set_mode("command", True)
+        h.svc.set_mode("reward", False)
         bot.bus.channel_event.emit(redeem("tres", redemption_id="apagado"))
         await settle()
 
     asyncio.run(main())
     assert [c[2] for c in h.redemptions.calls if c[3]] == ["vacio", "llena", "apagado"]
-    assert [i.text for i in h.svc.pending] == ["uno"]
+    assert [i.text for i in h.svc.pending] == [f"canje {n}" for n in range(4)]
 
 
 def test_reward_refunded_when_removed_or_sanctioned(bot, db):
