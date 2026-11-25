@@ -203,15 +203,17 @@ class WindowOutline(QWidget):
 
 
 def corner_styles(radius: int) -> dict[str, str]:
-    """Hojas de estilo de las piezas que tocan las esquinas (barra lateral, cabecera, barra inferior)."""
+    """Hojas de estilo de las piezas que tocan las esquinas (barra lateral, cabecera, pie)."""
     r = f"{radius}px"
     return {
         "sidebar": f"QFrame#sidebar {{ background: {t.BG_950}; border-right: 1px solid {t.BORDER};"
-                   f" border-top-left-radius: {r}; border-bottom-left-radius: {r}; }}",
+                   f" border-top-left-radius: {r}; }}",
         "header": f"QFrame#header {{ background: {t.BG_900}; border-bottom: 1px solid {t.BORDER};"
                   f" border-top-right-radius: {r}; }}",
-        "nowBar": f"QFrame#nowBar {{ background: {t.BG_950}; border-top: 1px solid {t.BORDER};"
-                  f" border-bottom-right-radius: {r}; }}",
+        "nowBar": f"QFrame#nowBar {{ background: {t.BG_950}; border-top: 1px solid {t.BORDER}; }}",
+        "footer": f"QLabel#appFooter {{ background: {t.BG_950}; border-top: 1px solid {t.BORDER};"
+                  f" color: {t.TEXT_3}; font-size: 11px;"
+                  f" border-bottom-left-radius: {r}; border-bottom-right-radius: {r}; }}",
     }
 
 

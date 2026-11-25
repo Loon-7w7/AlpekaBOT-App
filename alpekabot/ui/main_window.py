@@ -49,6 +49,8 @@ SHUTDOWN_TIMEOUT_S = 10
 PROGRESS_POLL_MS = 1000
 UPDATE_CHECK_DELAY_S = 5  # deja terminar el arranque antes de consultar GitHub
 FIRST_RUN_SETTINGS_DELAY_MS = 2500  # primera vez: Configuración se abre cuando la ventana ya está lista
+FOOTER_TEXT = "Producciones Alpeka/LonyArts"
+FOOTER_H = 22
 
 
 class MainWindow(QMainWindow):
@@ -148,9 +150,13 @@ class MainWindow(QMainWindow):
         right = QWidget()
         right.setObjectName("contentArea")  # transparente: las esquinas las pintan cabecera y barra inferior
         right.setLayout(vbox(self._header, self._stack, self.now_bar, spacing=0))
+        self._footer = QLabel(FOOTER_TEXT)
+        self._footer.setObjectName("appFooter")
+        self._footer.setAlignment(Qt.AlignCenter)
+        self._footer.setFixedHeight(FOOTER_H)
         root = QWidget()
         root.setObjectName("roundedRoot")
-        root.setLayout(hbox(self.sidebar, right, spacing=0))
+        root.setLayout(vbox(hbox(self.sidebar, right, spacing=0), self._footer, spacing=0))
         self.setCentralWidget(root)
         # Esquinas redondeadas propias: ventana transparente y cada pieza del borde con su radio
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -216,6 +222,7 @@ class MainWindow(QMainWindow):
         self.sidebar.setStyleSheet(styles["sidebar"])
         self._header.setStyleSheet(styles["header"])
         self.now_bar.setStyleSheet(styles["nowBar"])
+        self._footer.setStyleSheet(styles["footer"])
         self._outline.radius = radius
         self._outline.update()
 
