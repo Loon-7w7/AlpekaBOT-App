@@ -202,7 +202,8 @@ def test_sin_clave_no_consulta(tmp_path):
         asyncio.run(Updater("1.0.0", "http://127.0.0.1:9", "", tmp_path).check())
 
 
-def test_sin_conexion_da_un_error_claro(tmp_path):
+def test_sin_conexion_da_un_error_claro(tmp_path, refused_ports):
+    refused_ports.add(9)
     _, public = _key()
     with pytest.raises(UpdateError, match="conexión"):
         asyncio.run(Updater("1.0.0", "http://127.0.0.1:9", public, tmp_path).check())

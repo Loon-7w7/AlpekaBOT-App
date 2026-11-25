@@ -258,17 +258,19 @@ def test_sin_respuesta_da_error_de_tiempo():
 
 
 # ------------------------------------------------------------------ reconexión
-def test_vts_cerrado_avisa_y_reintenta(monkeypatch):
+def test_vts_cerrado_avisa_y_reintenta(monkeypatch, refused_ports):
     monkeypatch.setattr(vts, "RECONNECT_S", 0.02)
 
     async def main():
         async with Env(token="tok-valido") as e:
             port = e.server.port
             await e.server.stop()
+            refused_ports.add(port)
             e.client.start()
             await wait_for(lambda: "reintento" in e.client.status.detail)
             assert e.client.status.state is VTSState.CONNECTING
             assert str(port) in e.client.status.detail
+            refused_ports.discard(port)
             await e.server.start(port)  # VTube Studio se abre
             await e.until(VTSState.CONNECTED)
     run(main())

@@ -90,7 +90,8 @@ def test_api_oficial_sin_clave():
         asyncio.run(OfficialAPI(lambda: "").get_video(VID))
 
 
-def test_error_de_red_sin_filtrar_la_clave(caplog):
+def test_error_de_red_sin_filtrar_la_clave(caplog, refused_ports):
+    refused_ports.add(1)
     old = youtube.API_BASE
     youtube.API_BASE = "http://127.0.0.1:1/"  # puerto cerrado
     try:

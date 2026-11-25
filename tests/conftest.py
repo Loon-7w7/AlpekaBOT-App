@@ -49,6 +49,29 @@ class FakeBot:
 
 
 @pytest.fixture
+def refused_ports(monkeypatch):
+    """Puertos de localhost que rechazan la conexión al instante.
+
+    En Windows, conectar a un puerto cerrado tarda ~2 s (reintentos de TCP). Este
+    fixture da el mismo error que aiohttp lanzaría (ClientConnectorError) sin
+    esperar. Devuelve un set: añadir o quitar puertos durante el test.
+    """
+    import aiohttp
+    from aiohttp.connector import TCPConnector
+
+    ports: set[int] = set()
+    original = TCPConnector._create_connection
+
+    async def fake(self, req, traces, timeout):
+        if req.url.port in ports:
+            raise aiohttp.ClientConnectorError(req.connection_key, ConnectionRefusedError(10061, "refused"))
+        return await original(self, req, traces, timeout)
+
+    monkeypatch.setattr(TCPConnector, "_create_connection", fake)
+    return ports
+
+
+@pytest.fixture
 def db():
     d = Database(":memory:")
     yield d

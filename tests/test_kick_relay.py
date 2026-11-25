@@ -138,7 +138,9 @@ def test_token_caducado_se_renueva_una_vez():
     assert asyncio.run(main()) == (1, ["viejo", "ok"])
 
 
-def test_servidor_caido_da_error_claro():
+def test_servidor_caido_da_error_claro(refused_ports):
+    refused_ports.add(9)
+
     async def main():
         conn = RelayConnection("http://127.0.0.1:9/", Tokens(), None)
         try:
