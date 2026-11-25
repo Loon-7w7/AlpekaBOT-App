@@ -231,7 +231,7 @@ class KickClient(PlatformClient):
             await self._relay.start()
 
         await self._subscribe()
-        await self._refresh_stream()
+        await self.refresh_stream()
 
     async def _subscribe(self) -> None:
         sid = self.streamer.user_id
@@ -282,7 +282,7 @@ class KickClient(PlatformClient):
         while True:
             await asyncio.sleep(STREAM_POLL_S)
             try:
-                await self._refresh_stream()
+                await self.refresh_stream()
             except asyncio.CancelledError:
                 raise
             except PlatformError as exc:
@@ -290,10 +290,12 @@ class KickClient(PlatformClient):
             except Exception:
                 log.exception("Kick: error consultando el estado del directo")
 
-    async def _refresh_stream(self) -> None:
-        ch = await self._call(AccountRole.STREAMER, self._api.channel, self.streamer.user_id)
-        if not ch:
+    async def refresh_stream(self) -> None:
+        if self.streamer is None:
             return
+        ch = await self._call(AccountRole.STREAMER, self._api.channel, self.streamer.user_id)
+        if not ch or self._state not in (ConnectionState.CONNECTED, ConnectionState.CONNECTING):
+            return  # si se desconectó durante la consulta, no se pisa el estado
         self._slug = ch.get("slug", self._slug)
         stream = ch.get("stream") or {}
         live = bool(stream.get("is_live"))
@@ -367,7 +369,7 @@ class KickClient(PlatformClient):
             hint = " Reconecta la cuenta del streamer de Kick." if exc.status in (401, 403) else ""
             raise PlatformError(f"Kick no dejó cambiar el título o la categoría: {exc}{hint}") from None
         try:
-            await self._refresh_stream()  # refresca lo que muestran la app y las variables
+            await self.refresh_stream()  # refresca lo que muestran la app y las variables
         except Exception:
             log.debug("Kick: no se pudo refrescar el directo tras el cambio", exc_info=True)
 

@@ -141,6 +141,12 @@ class TwitchClient(PlatformClient):
                 log.exception("Error consultando el estado del directo")
             await asyncio.sleep(STREAM_POLL_S)
 
+    async def refresh_stream(self) -> None:
+        try:
+            await self._poll_stream()
+        except TwitchAPIException as exc:
+            raise PlatformError(f"Twitch no respondió ({type(exc).__name__})") from None
+
     async def _poll_stream(self) -> None:
         api, streamer = self._streamer_api, self.streamer
         if api is None or streamer is None:
@@ -152,7 +158,8 @@ class TwitchClient(PlatformClient):
             channels = await api.get_channel_information(streamer.user_id)
             ch = channels[0] if channels else None
             info = StreamInfo(Platform.TWITCH, False, ch.title if ch else "", ch.game_name if ch else "")
-        self._set_stream(info)
+        if self._streamer_api is api:  # si se desconectó durante la consulta, no se pisa el estado
+            self._set_stream(info)
 
     async def _cleanup(self) -> None:
         if self._monitor_task is not None:

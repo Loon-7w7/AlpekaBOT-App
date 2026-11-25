@@ -101,6 +101,9 @@ class PlatformClient(ABC):
         return None
 
     # -------------------------------------------- título y categoría
+    async def refresh_stream(self) -> None:
+        """Vuelve a consultar el estado del directo (``stream_info``). Errores: ``PlatformError``."""
+
     async def search_categories(self, query: str, limit: int = 10) -> list[Category]:
         """Categorías cuyo nombre se parece a ``query`` (la más parecida primero)."""
         raise PlatformError(f"{self.platform.label} no permite buscar categorías")

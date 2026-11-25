@@ -6,6 +6,8 @@ Reglas acordadas con el usuario:
   ``!game kick …`` cambian solo esa.
 - ``!game`` usa la coincidencia exacta si existe y si no la primera de la búsqueda,
   y dice en el chat cuál puso.
+- Los comandos solo cambian las plataformas que están en directo (``live_only``); la
+  página «Directo» no lo exige, para poder preparar el directo antes de empezar.
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ TITLE_COMMAND = "title"
 GAME_COMMAND = "game"
 CHANGE_PERMISSION = Permission.MODERATOR
 SEARCH_LIMIT = 10
+REFRESH_TIMEOUT_S = 5  # máximo para volver a consultar si una plataforma está en directo
 
 # resultado por plataforma: None = bien, texto = motivo del fallo
 Results = dict[Platform, str | None]
@@ -63,15 +66,16 @@ class StreamControl:
         return client
 
     # ------------------------------------------------------------- cambios
-    async def set_title(self, title: str, platforms) -> Results:
+    async def set_title(self, title: str, platforms, live_only: bool = False) -> Results:
         title = title.strip()
 
         async def one(p: Platform) -> None:
             await self._client(p).update_stream(title=title)
 
-        return await self._run(platforms, one, "el título")
+        return await self._run(platforms, one, "el título", live_only)
 
-    async def set_category(self, query: str, platforms) -> tuple[Results, dict[Platform, Category]]:
+    async def set_category(self, query: str, platforms,
+                           live_only: bool = False) -> tuple[Results, dict[Platform, Category]]:
         """Busca la categoría en cada plataforma y la aplica. Devuelve (resultados, categoría puesta)."""
         applied: dict[Platform, Category] = {}
 
@@ -83,13 +87,29 @@ class StreamControl:
             await client.update_stream(category=cat)
             applied[p] = cat
 
-        return await self._run(platforms, one, "la categoría"), applied
+        return await self._run(platforms, one, "la categoría", live_only), applied
 
-    async def _run(self, platforms, fn, what: str) -> Results:
+    async def _require_live(self, p: Platform) -> None:
+        """Error si la plataforma no está en directo. Antes de rechazar vuelve a consultar,
+        porque el estado guardado puede ir hasta un minuto atrasado."""
+        client = self._client(p)
+        if client.stream_info.is_live:
+            return
+        try:
+            await asyncio.wait_for(client.refresh_stream(), REFRESH_TIMEOUT_S)
+        except (PlatformError, asyncio.TimeoutError):
+            raise PlatformError("no pude comprobar si está en directo") from None
+        if not client.stream_info.is_live:
+            raise PlatformError("no está en directo")
+
+    async def _run(self, platforms, fn, what: str, live_only: bool = False) -> Results:
+        """Aplica ``fn`` en cada plataforma a la vez. ``live_only``: solo en las que están en directo."""
         targets = list(dict.fromkeys(platforms))
 
         async def guarded(p: Platform) -> str | None:
             try:
+                if live_only:
+                    await self._require_live(p)
                 await fn(p)
             except PlatformError as exc:
                 log.warning("%s: no se pudo cambiar %s: %s", p.label, what, exc)
@@ -134,7 +154,7 @@ class StreamControl:
             return f"Título en {p.label}: {title}" if title else f"{p.label} no tiene título."
         if msg.permission < CHANGE_PERMISSION:
             return None
-        results = await self.set_title(" ".join(rest), targets)
+        results = await self.set_title(" ".join(rest), targets, live_only=True)
         return self._summary(results, f"Título cambiado en {_names(p for p, e in results.items() if not e)}.")
 
     async def _cmd_game(self, msg: ChatMessage, args: list[str]) -> str | None:
@@ -147,7 +167,7 @@ class StreamControl:
             return f"Categoría en {p.label}: {game}" if game else f"{p.label} no tiene categoría."
         if msg.permission < CHANGE_PERMISSION:
             return None
-        results, applied = await self.set_category(" ".join(rest), targets)
+        results, applied = await self.set_category(" ".join(rest), targets, live_only=True)
         return self._summary(results, category_text(applied))
 
     @staticmethod

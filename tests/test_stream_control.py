@@ -30,6 +30,13 @@ class StreamClient(FakeClient):
         self.catalog = [Category(self.platform, "1", "Minecraft Dungeons"), Category(self.platform, "2", "Minecraft")]
         self.updates: list[tuple[str | None, Category | None]] = []
         self.fail: str | None = None
+        self.on_refresh: str | None = None  # "live" = al reconsultar ya está en directo; "fail" = error
+
+    async def refresh_stream(self):
+        if self.on_refresh == "fail":
+            raise PlatformError("sin respuesta")
+        if self.on_refresh == "live":
+            self.stream_info = StreamInfo(self.platform, True, self.stream_info.title, self.stream_info.game)
 
     @property
     def state(self):
@@ -127,6 +134,30 @@ def test_game_sin_resultados_y_fallo_parcial(env):
     bot.platforms[Platform.KICK].fail = "Kick rechazó el cambio"
     reply = handle(service, "!title Hola", MOD)
     assert reply == "Título cambiado en Twitch. No se pudo en Kick: Kick rechazó el cambio"
+
+
+def test_comandos_solo_cambian_en_directo_y_la_pagina_siempre(env):
+    bot, service = env
+    kick = bot.platforms[Platform.KICK]
+    kick.stream_info = StreamInfo(Platform.KICK, is_live=False, title="Viejo")
+    reply = handle(service, "!title Hola", MOD)
+    assert reply == "Título cambiado en Twitch. No se pudo en Kick: no está en directo"
+    assert kick.updates == []
+    assert handle(service, "!game kick minecraft", MOD) == "No se pudo cambiar. Kick: no está en directo"
+    assert handle(service, "!title kick") == "Título en Kick: Viejo"  # consultar funciona sin directo
+    assert run(bot.stream.set_title("Preparado", [Platform.KICK])) == {Platform.KICK: None}  # página
+
+
+def test_reconsulta_antes_de_rechazar(env):
+    bot, service = env
+    kick = bot.platforms[Platform.KICK]
+    kick.stream_info = StreamInfo(Platform.KICK, is_live=False)
+    kick.on_refresh = "live"  # el directo acaba de empezar
+    assert handle(service, "!title kick Hola", MOD) == "Título cambiado en Kick."
+    kick.stream_info = StreamInfo(Platform.KICK, is_live=False)
+    kick.on_refresh = "fail"
+    assert handle(service, "!title kick Hola", MOD) == \
+        "No se pudo cambiar. Kick: no pude comprobar si está en directo"
 
 
 def test_desactivar_title_lo_silencia(env):
@@ -281,7 +312,7 @@ def test_kick_client_ordena_la_exacta_primero():
     async def no_refresh():
         return None
     c._call = fake_call
-    c._refresh_stream = no_refresh
+    c.refresh_stream = no_refresh
     c._api = _Obj(search_categories=_named("search_categories"), update_channel=_named("update_channel"))
     assert [x.id for x in run(c.search_categories("minecraft"))] == ["2", "1"]
     run(c.update_stream(title="Hola", category=Category(Platform.KICK, "2", "Minecraft")))
