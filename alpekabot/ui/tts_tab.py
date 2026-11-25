@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import replace
 
 from PySide6.QtCore import Qt
 from PySide6.QtMultimedia import QMediaDevices
 from PySide6.QtWidgets import QComboBox, QFrame, QLineEdit, QMessageBox, QSlider, QSpinBox, QWidget
 
-from ..core.models import Permission, Platform, Reward
+from ..core.models import Permission, Platform
 from ..features.reactions import RewardLink
 from ..features.tts import (
     MAX_CHARS,
@@ -28,11 +27,10 @@ from ..features.tts import (
     TtsService,
     reward_links,
 )
-from ..platforms.base import PlatformError
 from . import theme as t
 from .commands_tab import ElidedLabel, scroll_page
 from .tts_player import output_devices
-from .vtube_tab import RewardDialog, RewardPicker
+from .vtube_tab import RewardDialog, RewardHost, RewardPicker
 from .widgets import Pill, Toggle, button, clear_layout, frame, hbox, icon_button, icon_label, label, vbox
 
 log = logging.getLogger(__name__)
@@ -88,7 +86,7 @@ class QueueRow(QFrame):
         self.setLayout(lay)
 
 
-class TtsTab(QWidget):
+class TtsTab(QWidget, RewardHost):
     title = "Texto a voz (TTS)"
     icon = "audio-lines"
 
@@ -269,33 +267,12 @@ class TtsTab(QWidget):
         self._mode_warn.setText("\n".join(warnings))
         self._mode_warn.setVisible(bool(warnings))
 
+    def spawn(self, coro) -> asyncio.Future:  # lo usa RewardHost
+        return asyncio.ensure_future(coro)
+
     def _save_reward(self, picker: RewardPicker) -> None:
         reward = picker.selected()
         self.svc.set_reward(picker.platform, reward.id if reward else "", reward.title if reward else "")
-
-    async def load_rewards(self) -> None:
-        if self._bot is None:
-            return
-        for picker in self.pickers.values():
-            picker.set_connected(self._bot.platforms[picker.platform].is_connected)
-        if not self._bot.any_connected:
-            self._reward_hint.setText("Conecta Twitch o Kick para ver sus premios.")
-            return
-        self._reward_hint.setText("Cargando premios…")
-        try:
-            rewards, errors = await self._bot.list_rewards()
-        except Exception:
-            log.exception("Error cargando los premios")
-            rewards, errors = [], ["Error inesperado al cargar los premios (mira la consola)."]
-        self._rewards_loaded = not errors
-        for reward in rewards:
-            self.pickers[reward.platform].add(reward)
-        if errors:
-            self._reward_hint.setText(" · ".join(errors))
-        elif not any(picker.rewards for picker in self.pickers.values()):
-            self._reward_hint.setText("Todavía no hay premios: crea uno con el botón +.")
-        else:
-            self._reward_hint.setText("")
 
     def open_reward_dialog(self, platform: Platform) -> RewardDialog:
         dlg = RewardDialog(self._bot, platform, self, subtitle=REWARD_SUBTITLE, input_required=True)
@@ -305,28 +282,6 @@ class TtsTab(QWidget):
         dlg.created.connect(self._on_reward_created)
         dlg.open()
         return dlg
-
-    def _on_reward_created(self, reward: Reward) -> None:
-        picker = self.pickers[reward.platform]
-        picker.add(replace(reward, managed=True))
-        picker.select(reward.id)
-
-    def confirm_delete_reward(self, picker: RewardPicker) -> None:
-        reward = picker.selected()
-        if reward is None:
-            return
-        answer = QMessageBox.question(self, "Borrar premio",
-                                      f"¿Borrar el premio «{reward.title}» de {reward.platform.label}?")
-        if answer == QMessageBox.Yes:
-            asyncio.ensure_future(self._delete_reward(picker, reward))
-
-    async def _delete_reward(self, picker: RewardPicker, reward: Reward) -> None:
-        try:
-            await self._bot.delete_reward(reward.platform, reward.id)
-        except PlatformError as exc:
-            self._reward_hint.setText(str(exc))
-            return
-        picker.remove(reward.id)
 
     def _build_voice(self) -> QFrame:
         cfg = self.svc.config

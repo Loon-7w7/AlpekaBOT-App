@@ -382,7 +382,7 @@ def test_edge_synthesize_maps_no_audio_to_unreadable(monkeypatch):
             raise edge_tts.exceptions.NoAudioReceived("No audio")
             yield  # pragma: no cover
 
-    monkeypatch.setattr(tts.edge_tts, "Communicate", Boom)
+    monkeypatch.setattr(edge_tts, "Communicate", Boom)
     with pytest.raises(tts.UnreadableText):
         asyncio.run(tts.edge_synthesize("アイドル", "es-MX-JorgeNeural", 0))
 

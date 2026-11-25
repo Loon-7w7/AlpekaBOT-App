@@ -18,7 +18,6 @@ from PySide6.QtGui import (
     QAbstractTextDocumentLayout,
     QColor,
     QFontMetrics,
-    QGuiApplication,
     QPainter,
     QPainterPath,
     QTextDocument,
@@ -36,7 +35,7 @@ from PySide6.QtWidgets import (
 
 from ..core.models import ChatMessage, Platform
 from . import theme as t
-from .widgets import button, frame, hbox, initials, vbox
+from .widgets import button, copy_text, frame, hbox, initials, vbox
 
 MAX_ENTRIES = 1000
 ECHO_WINDOW_S = 20  # el eco de un mensaje del bot sustituido por una tarjeta se ignora durante este tiempo
@@ -480,7 +479,7 @@ class ChatView(QWidget):
         title.setEnabled(False)
         menu.addSeparator()
         copy = menu.addAction(t.icon("copy"), "Copiar mensaje")
-        copy.triggered.connect(lambda: _copy(msg.text))
+        copy.triggered.connect(lambda: copy_text(msg.text))
         menu.addSeparator()
         protected = msg.is_moderator
         for icon, text, action, allowed in (
@@ -510,5 +509,3 @@ class ChatView(QWidget):
             self.send_requested.emit(self._target.currentData(), text)
 
 
-def _copy(text: str) -> None:
-    QGuiApplication.clipboard().setText(text)

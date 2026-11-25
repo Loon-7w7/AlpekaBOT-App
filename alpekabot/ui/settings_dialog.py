@@ -7,7 +7,6 @@ import logging
 from html import escape
 
 from PySide6.QtCore import Signal
-from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox,
     QFormLayout,
@@ -33,7 +32,7 @@ from ..platforms.kick.tunnel import normalize_domain
 from ..platforms.kick.webhook import WEBHOOK_PATH
 from ..platforms.base import PlatformError
 from . import theme as t
-from .widgets import ModalDialog, button
+from .widgets import ModalDialog, button, copy_text
 
 log = logging.getLogger(__name__)
 
@@ -60,7 +59,7 @@ class _AccountRow(QWidget):
         self._code_url = ""
         # Twitch: copiar el enlace de activación (p. ej. para abrirlo en una ventana de incógnito)
         self._copy_link = QPushButton("Copiar enlace")
-        self._copy_link.clicked.connect(lambda: QGuiApplication.clipboard().setText(self._code_url))
+        self._copy_link.clicked.connect(lambda: copy_text(self._code_url))
         self._copy_link.hide()
         self._connect = QPushButton()
         self._connect.clicked.connect(self._on_connect_clicked)
@@ -224,7 +223,7 @@ class SettingsDialog(ModalDialog):
     @staticmethod
     def _copy_field(edit: QLineEdit) -> QHBoxLayout:
         copy = QPushButton("Copiar")
-        copy.clicked.connect(lambda: QGuiApplication.clipboard().setText(edit.text()))
+        copy.clicked.connect(lambda: copy_text(edit.text()))
         row = QHBoxLayout()
         row.addWidget(edit)
         row.addWidget(copy)

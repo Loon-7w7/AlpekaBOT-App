@@ -25,8 +25,6 @@ from collections import deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Awaitable, Callable, Protocol
 
-import edge_tts
-
 from ..config import TtsConfig
 from ..core.event_bus import EventBus
 from ..platforms.base import PlatformError
@@ -113,6 +111,8 @@ class UnreadableText(Exception):
 
 async def edge_synthesize(text: str, voice: str, rate: int) -> bytes:
     """Genera el audio con el servicio de Edge. edge-tts ya escapa el texto para SSML."""
+    import edge_tts  # se carga al usarlo: importarlo tarda ~0,5 s al abrir la app
+
     communicate = edge_tts.Communicate(text, voice, rate=f"{rate:+d}%")
     try:
         chunks = [c["data"] async for c in communicate.stream() if c["type"] == "audio"]
@@ -133,6 +133,8 @@ def voice_label(short_name: str, gender: str = "") -> str:
 
 async def edge_voices() -> list[Voice]:
     """Voces disponibles, con las de español primero."""
+    import edge_tts
+
     voices = await edge_tts.list_voices()
     voices.sort(key=lambda v: (not v["ShortName"].startswith("es-"), v["ShortName"]))
     return [Voice(v["ShortName"], voice_label(v["ShortName"], v.get("Gender", ""))) for v in voices]

@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import replace
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox,
     QFrame,
@@ -23,6 +22,7 @@ from ..core.models import Permission, Platform
 from ..features.commands import MAX_REPLY_LEN, Command, CommandRepository
 from . import theme as t
 from .widgets import (
+    copy_text,
     StatLine,
     ChipGroup,
     Dot,
@@ -104,10 +104,6 @@ def platform_line(platforms: frozenset[Platform]) -> QWidget:
     return w
 
 
-def _copy(text: str) -> None:
-    QGuiApplication.clipboard().setText(text)
-
-
 class VariablesBar(QFrame):
     """«</> VARIABLES: $user $target …» — clic para copiar (o insertar en un editor)."""
 
@@ -118,7 +114,7 @@ class VariablesBar(QFrame):
         flow = FlowLayout(8)
         for v in variables:
             b = button(v, object_name="varChip")
-            b.clicked.connect(lambda _=False, var=v: (on_click or _copy)(var))
+            b.clicked.connect(lambda _=False, var=v: (on_click or copy_text)(var))
             flow.addWidget(b)
         chips = QWidget()
         chips.setLayout(flow)

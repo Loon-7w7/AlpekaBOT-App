@@ -10,7 +10,7 @@ from dataclasses import fields
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, QTimer, QUrl
-from PySide6.QtGui import QColor, QFont, QGuiApplication
+from PySide6.QtGui import QColor, QFont
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QColorDialog,
@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 from ..config import OverlayConfig
 from ..features.overlay import ANIMATIONS, LIMITS
 from . import theme as t
-from .widgets import ModalDialog, Toggle, button, frame, hbox, icon_label, label, vbox
+from .widgets import ModalDialog, Toggle, button, copy_text, frame, hbox, icon_label, label, vbox
 
 if TYPE_CHECKING:
     from ..bot import AlpekaBot
@@ -301,7 +301,7 @@ class OverlayDialog(ModalDialog):
         self._copy.setEnabled(srv.running)
 
     def _copy_url(self) -> None:
-        QGuiApplication.clipboard().setText(self.bot.overlay.url)
+        copy_text(self.bot.overlay.url)
         self._copy.setText("¡Copiada!")
         QTimer.singleShot(1500, lambda: self._copy.setText("Copiar URL"))
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Callable, Iterable
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractButton,
     QAbstractItemView,
@@ -114,6 +114,11 @@ class FlowLayout(QLayout):
             x += hint.width() + sp
             line_h = max(line_h, hint.height())
         return y + line_h - rect.y()
+
+
+def copy_text(text: str) -> None:
+    """Copia el texto al portapapeles."""
+    QGuiApplication.clipboard().setText(text)
 
 
 def clear_layout(lay: QLayout) -> None:

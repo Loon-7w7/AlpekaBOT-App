@@ -8,11 +8,10 @@ import time
 from collections import deque
 
 from PySide6.QtCore import QObject, Signal
-from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QTextBrowser, QWidget
 
 from . import theme as t
-from .widgets import ChipGroup, button, hbox, label, vbox
+from .widgets import ChipGroup, button, copy_text, hbox, label, vbox
 
 MAX_LINES = 3000
 
@@ -114,7 +113,7 @@ class LogPanel(QWidget):
         self._view.verticalScrollBar().setValue(self._view.verticalScrollBar().maximum())
 
     def _copy(self) -> None:
-        QGuiApplication.clipboard().setText(
+        copy_text(
             "\n".join(f"{s} {_LEVELS.get(lv, ('INFO', ''))[0]} {txt}" for s, lv, txt in self._records
                       if lv >= self._min_level))
 

@@ -434,6 +434,66 @@ class RewardPicker(QWidget):
         self.delete_button.setEnabled(self._connected)
 
 
+class RewardHost:
+    """Cargar, crear y borrar premios para los ``RewardPicker`` de quien los contiene.
+
+    Lo comparten el editor de reacciones y la página del TTS. Quien lo usa define ``_bot``,
+    ``_repo``, ``pickers``, ``_reward_hint`` (texto plano), ``spawn(coro)`` y
+    ``open_reward_dialog(platform)``.
+    """
+
+    REWARDS_READY = ""        # aviso cuando ya hay premios cargados
+    REWARD_DELETE_NOTE = ""   # línea extra al confirmar el borrado
+    _rewards_loaded = False
+
+    async def load_rewards(self) -> None:
+        if self._bot is None:
+            return
+        for picker in self.pickers.values():
+            picker.set_connected(self._bot.platforms[picker.platform].is_connected)
+        if not self._bot.any_connected:
+            self._reward_hint.setText("Conecta Twitch o Kick para ver sus premios.")
+            return
+        self._reward_hint.setText("Cargando premios…")
+        try:
+            rewards, errors = await self._bot.list_rewards()
+        except Exception:
+            log.exception("Error cargando los premios")
+            rewards, errors = [], ["Error inesperado al cargar los premios (mira la consola)."]
+        self._rewards_loaded = not errors
+        for reward in rewards:
+            self.pickers[reward.platform].add(reward)
+        if errors:
+            self._reward_hint.setText(" · ".join(errors))
+        elif not any(picker.rewards for picker in self.pickers.values()):
+            self._reward_hint.setText("Todavía no hay premios: crea uno con el botón +.")
+        else:
+            self._reward_hint.setText(self.REWARDS_READY)
+
+    def _on_reward_created(self, reward: Reward) -> None:
+        picker = self.pickers[reward.platform]
+        picker.add(replace(reward, managed=True))
+        picker.select(reward.id)
+
+    def confirm_delete_reward(self, picker: RewardPicker) -> None:
+        reward = picker.selected()
+        if reward is None:
+            return
+        note = f"\n{self.REWARD_DELETE_NOTE}" if self.REWARD_DELETE_NOTE else ""
+        answer = QMessageBox.question(self, "Borrar premio",
+                                      f"¿Borrar el premio «{reward.title}» de {reward.platform.label}?{note}")
+        if answer == QMessageBox.Yes:
+            self.spawn(self.delete_reward(picker, reward))
+
+    async def delete_reward(self, picker: RewardPicker, reward: Reward) -> None:
+        try:
+            await self._bot.delete_reward(reward.platform, reward.id)
+        except PlatformError as exc:
+            self._reward_hint.setText(str(exc))
+            return
+        picker.remove(reward.id)
+
+
 class _AsyncDialog(ModalDialog):
     """Modal cuyas tareas en segundo plano se cancelan al cerrarlo (sus widgets dejan de existir)."""
 
@@ -452,7 +512,10 @@ class _AsyncDialog(ModalDialog):
         super().done(result)
 
 
-class ReactionDialog(_AsyncDialog):
+class ReactionDialog(_AsyncDialog, RewardHost):
+    REWARDS_READY = "Los premios creados por la app devuelven los puntos si VTube Studio está cerrado."
+    REWARD_DELETE_NOTE = "Las reacciones que lo usan dejarán de saltar en esa plataforma."
+
     def __init__(self, bot, reaction: Reaction | None, parent=None) -> None:
         super().__init__("Editar Reacción" if reaction else "Crear Nueva Reacción",
                          "Qué hace tu avatar cuando llega un canje o un evento del canal.", "sparkles", parent,
@@ -483,6 +546,7 @@ class ReactionDialog(_AsyncDialog):
         links = {link.platform: link for link in x.rewards}
         self.pickers = {p: RewardPicker(self, p, links.get(p)) for p in Platform}
         self._reward_hint = label("", color=t.TEXT_3, size=12, wrap=True)
+        self._reward_hint.setTextFormat(Qt.PlainText)  # los errores de las plataformas no son HTML
         reload_rewards = icon_button("repeat", "Volver a cargar los premios",
                                      lambda: self.spawn(self.load_rewards()), t.TEXT_2, 16, "iconBox")
         hint_row = hbox(self._reward_hint, reload_rewards, spacing=8)
@@ -578,58 +642,12 @@ class ReactionDialog(_AsyncDialog):
             self._min_label.setText(text)
             self.min_amount.setSuffix(suffix)
 
-    async def load_rewards(self) -> None:
-        for picker in self.pickers.values():
-            picker.set_connected(self._bot.platforms[picker.platform].is_connected)
-        if not self._bot.any_connected:
-            self._reward_hint.setText("Conecta Twitch o Kick para ver sus premios.")
-            return
-        self._reward_hint.setText("Cargando premios…")
-        try:
-            rewards, errors = await self._bot.list_rewards()
-        except Exception:
-            log.exception("Error cargando los premios")
-            rewards, errors = [], ["Error inesperado al cargar los premios (mira la consola)."]
-        for reward in rewards:
-            self.pickers[reward.platform].add(reward)
-        if errors:
-            self._reward_hint.setText(_escape(" · ".join(errors)))
-        elif not any(picker.rewards for picker in self.pickers.values()):
-            self._reward_hint.setText("Todavía no hay premios: crea uno con el botón +.")
-        else:
-            self._reward_hint.setText("Los premios creados por la app devuelven los puntos si VTube Studio está cerrado.")
-
     def open_reward_dialog(self, platform: Platform) -> "RewardDialog":
         dlg = RewardDialog(self._bot, platform, self)
         dlg.setAttribute(Qt.WA_DeleteOnClose)
         dlg.created.connect(self._on_reward_created)
         dlg.open()
         return dlg
-
-    def _on_reward_created(self, reward: Reward) -> None:
-        picker = self.pickers[reward.platform]
-        picker.add(replace(reward, managed=True))
-        picker.select(reward.id)
-
-    def confirm_delete_reward(self, picker: RewardPicker) -> None:
-        reward = picker.selected()
-        if reward is None:
-            return
-        answer = QMessageBox.question(
-            self, "Borrar premio",
-            f"¿Borrar el premio «{reward.title}» de {reward.platform.label}?\n"
-            "Las reacciones que lo usan dejarán de saltar en esa plataforma.",
-        )
-        if answer == QMessageBox.Yes:
-            self.spawn(self.delete_reward(picker, reward))
-
-    async def delete_reward(self, picker: RewardPicker, reward: Reward) -> None:
-        try:
-            await self._bot.delete_reward(reward.platform, reward.id)
-        except PlatformError as exc:
-            self._reward_hint.setText(_escape(str(exc)))
-            return
-        picker.remove(reward.id)
 
     # ----------------------------------------------------------------- pasos
     async def load_avatar(self) -> None:
