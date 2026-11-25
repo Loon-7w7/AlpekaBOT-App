@@ -162,3 +162,21 @@ def test_buscador_y_resaltado_del_respaldo(page):
     svc.play_backup(svc.repo.backup_list()[1].id)
     styled = [r for r in rows() if isinstance(r, BackupRow) and r.styleSheet()]
     assert len(styled) == 1 and styled is not None
+
+
+def test_portada_en_el_cuadro_del_disco(page, monkeypatch):
+    from PySide6.QtGui import QPixmap
+    from alpekabot.ui.songs_tab import Thumbnails
+
+    vid = "abcdefghijk"
+    cover = QPixmap(320, 180)
+    cover.fill(Qt.red)
+    monkeypatch.setitem(Thumbnails._raw, vid, cover)  # sin pedirla a internet
+    disc = page._disc.pixmap().toImage()
+    page.svc.repo.backup_add(VideoInfo(vid, "Con portada", "Canal", "UC", 180))
+    page.svc.play()
+    assert page._disc.property("thumb_id") == vid
+    assert page._disc.pixmap().toImage().pixelColor(55, 55) == Qt.red
+    page.svc.stop()  # sin canción: vuelve el disco
+    assert page._disc.property("thumb_id") == ""
+    assert page._disc.pixmap().toImage() == disc

@@ -64,6 +64,7 @@ def source_box(text: str = "YT", color: str = t.RED, size: int = 44) -> QLabel:
 
 
 _VIDEO_ID = re.compile(r"[A-Za-z0-9_-]{11}")
+ART_SIZE = 110  # cuadro de la portada (o el disco) en la tarjeta principal
 
 
 class Thumbnails:
@@ -71,23 +72,32 @@ class Thumbnails:
     sesión; mientras llegan, o si fallan, la fila enseña las iniciales del título."""
 
     _net: QNetworkAccessManager | None = None
-    _cache: dict[tuple[str, int], QPixmap] = {}
-    _waiting: dict[str, list[tuple[QLabel, int]]] = {}
+    _cache: dict[tuple[str, int, int], QPixmap] = {}
+    _waiting: dict[str, list[tuple[QLabel, int, int]]] = {}
     _raw: dict[str, QPixmap] = {}
 
     @classmethod
     def label(cls, video_id: str, title: str, size: int = 44) -> QLabel:
         box = source_box(initials(title), t.TEXT, size)
+        cls.load(box, video_id, size)
+        return box
+
+    @classmethod
+    def load(cls, box: QLabel, video_id: str, size: int, radius: int = 8) -> bool:
+        """Pone la miniatura en ``box`` (al momento o cuando llegue). False si el ID no es válido.
+
+        Si se pide otra miniatura para la misma etiqueta antes de que llegue, gana la última."""
         if not _VIDEO_ID.fullmatch(video_id or ""):
-            return box
+            return False
+        box.setProperty("thumb_id", video_id)
         if video_id in cls._raw:
-            cls._apply(box, video_id, size)
+            cls._apply(box, video_id, size, radius)
         else:
             first = video_id not in cls._waiting
-            cls._waiting.setdefault(video_id, []).append((box, size))
+            cls._waiting.setdefault(video_id, []).append((box, size, radius))
             if first:
                 cls._fetch(video_id)
-        return box
+        return True
 
     @classmethod
     def _fetch(cls, video_id: str) -> None:
@@ -102,14 +112,15 @@ class Thumbnails:
         pix = QPixmap()
         if reply.error() == QNetworkReply.NoError and pix.loadFromData(reply.readAll()):
             cls._raw[video_id] = pix
-            for box, size in waiting:
-                if shiboken6.isValid(box):  # la fila pudo rehacerse mientras tanto
-                    cls._apply(box, video_id, size)
+            for box, size, radius in waiting:
+                # la fila pudo rehacerse, o la etiqueta pidió otra miniatura, mientras tanto
+                if shiboken6.isValid(box) and box.property("thumb_id") == video_id:
+                    cls._apply(box, video_id, size, radius)
         reply.deleteLater()
 
     @classmethod
-    def _apply(cls, box: QLabel, video_id: str, size: int) -> None:
-        key = (video_id, size)
+    def _apply(cls, box: QLabel, video_id: str, size: int, radius: int = 8) -> None:
+        key = (video_id, size, radius)
         if key not in cls._cache:
             src = cls._raw[video_id]
             side = min(src.width(), src.height())  # recorte cuadrado del centro
@@ -120,7 +131,7 @@ class Thumbnails:
             p = QPainter(out)
             p.setRenderHint(QPainter.Antialiasing)
             path = QPainterPath()
-            path.addRoundedRect(QRectF(0, 0, size, size), 8, 8)
+            path.addRoundedRect(QRectF(0, 0, size, size), radius, radius)
             p.setClipPath(path)
             p.drawPixmap(0, 0, square)
             p.end()
@@ -319,12 +330,11 @@ class SongsTab(QWidget):
 
         # ----------------------------------------------------- tarjeta principal
         self._art = QStackedWidget()
-        self._art.setFixedSize(110, 110)
-        disc = QLabel()
-        disc.setAlignment(Qt.AlignCenter)
-        disc.setPixmap(t.pixmap("disc-3", t.ACCENT, 56))
-        disc.setStyleSheet(f"background: {t.BG_900}; border: 1px solid {t.BORDER}; border-radius: 14px;")
-        self._art.addWidget(disc)
+        self._art.setFixedSize(ART_SIZE, ART_SIZE)
+        self._disc = QLabel()  # la portada de la canción, o el disco si no suena nada
+        self._disc.setAlignment(Qt.AlignCenter)
+        self._show_cover(None)
+        self._art.addWidget(self._disc)
         player.view.setMinimumSize(1, 1)
         self._art.addWidget(player.view)  # oculto: solo se ve con el botón del ojo
 
@@ -547,10 +557,18 @@ class SongsTab(QWidget):
             self.svc.seek(pos)
             self.set_progress(pos, self._dur)
 
+    def _show_cover(self, song: Song | None) -> None:
+        """Portada de YouTube en el cuadro del disco (mientras llega, o si falla, el disco)."""
+        self._disc.setProperty("thumb_id", "")  # descarta una portada anterior que aún no llegó
+        self._disc.setPixmap(t.pixmap("disc-3", t.ACCENT, 56))
+        self._disc.setStyleSheet(f"background: {t.BG_900}; border: 1px solid {t.BORDER}; border-radius: 14px;")
+        if song is not None:
+            Thumbnails.load(self._disc, song.video_id, ART_SIZE, radius=14)
+
     def _toggle_video(self) -> None:
         showing = self._art.currentIndex() == 1
         self._art.setCurrentIndex(0 if showing else 1)
-        self._art.setFixedSize(*((110, 110) if showing else (320, 180)))
+        self._art.setFixedSize(*((ART_SIZE, ART_SIZE) if showing else (320, 180)))
         self._video_btn.setIcon(t.icon("eye-off" if showing else "monitor", t.TEXT_2, 17))
 
     def _overlay(self) -> None:
@@ -647,6 +665,8 @@ class SongsTab(QWidget):
         self._status = st
         if old != st.current:
             self._reload_backup()  # resalta la que suena
+        if (old and old.video_id) != (st.current and st.current.video_id):
+            self._show_cover(st.current)
         self._update_favorite()
         s = st.current
         enabled = self.svc.config.enabled
