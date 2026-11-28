@@ -100,6 +100,10 @@ class PlatformClient(ABC):
         """Busca un usuario por su nombre: (user_id, nombre visible) o None si no existe."""
         return None
 
+    async def profile_image_url(self) -> str | None:
+        """URL de la foto de perfil de la cuenta del streamer, o ``None`` si no se conoce."""
+        return None
+
     # -------------------------------------------- título y categoría
     async def refresh_stream(self) -> None:
         """Vuelve a consultar el estado del directo (``stream_info``). Errores: ``PlatformError``."""

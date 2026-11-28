@@ -7,10 +7,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import secrets
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+
+import aiohttp
 
 from . import credentials
 from .config import AppConfig
@@ -37,6 +40,28 @@ from .storage.database import Database
 
 log = logging.getLogger(__name__)
 
+AVATAR_MAX_BYTES = 2 * 1024 * 1024
+AVATAR_TIMEOUT_S = 10
+
+
+async def download_image(url: str) -> bytes | None:
+    """Descarga una imagen entera (máx. ``AVATAR_MAX_BYTES``); ``None`` si no es una imagen o es demasiado grande."""
+    timeout = aiohttp.ClientTimeout(total=AVATAR_TIMEOUT_S)
+    async with aiohttp.ClientSession(timeout=timeout) as http, http.get(url) as response:
+        response.raise_for_status()
+        if not response.content_type.startswith("image/"):
+            return None
+        data = b""
+        # read(n) devuelve lo que haya llegado, no el archivo entero: hay que leer hasta el final
+        while len(data) <= AVATAR_MAX_BYTES and (chunk := await response.content.read(64 * 1024)):
+            data += chunk
+    return data if len(data) <= AVATAR_MAX_BYTES else None
+
+
+def avatar_path(platform: Platform) -> Path:
+    """Foto de perfil del streamer guardada en disco (sin credenciales: es una imagen pública)."""
+    return DATA_DIR / "avatars" / f"{platform.value}.img"
+
 OVERLAY_TOKEN_SECRET = "overlay/token"
 LEGACY_NOW_PLAYING = DATA_DIR / "now_playing.txt"  # antiguo archivo para OBS (sustituido por el overlay)
 
@@ -51,6 +76,7 @@ class AlpekaBot:
         }
         # db_path explícito = modo prueba: no se tocan data/config.json ni el keyring del overlay
         real_data = db_path is None
+        self._real_data = real_data
         if real_data:
             ensure_dirs()
             db_path = DB_FILE
@@ -214,6 +240,36 @@ class AlpekaBot:
         except PlatformError as exc:
             return f"{platform.label}: {exc}"
         return None
+
+    def cached_avatar(self, platform: Platform) -> Path | None:
+        """La foto de perfil ya descargada de esa plataforma, si la hay."""
+        path = avatar_path(platform)
+        return path if self._real_data and path.is_file() else None
+
+    async def fetch_avatar(self, platform: Platform) -> Path | None:
+        """Descarga la foto de perfil del streamer de esa plataforma (conectada) a ``avatars/``.
+
+        Devuelve la ruta, o ``None`` si no hay foto o falló (la interfaz se queda con las iniciales).
+        """
+        client = self.platforms[platform]
+        if not self._real_data or not client.is_connected:
+            return None
+        try:
+            url = await client.profile_image_url()
+            if not url or not url.startswith("https://"):
+                return None
+            data = await download_image(url)
+        except Exception as exc:  # sin foto no pasa nada: se ven las iniciales
+            log.info("%s: no se pudo descargar la foto de perfil (%s)", platform.label, type(exc).__name__)
+            return None
+        if not data or len(data) > AVATAR_MAX_BYTES:
+            return None
+        path = avatar_path(platform)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_bytes(data)
+        os.replace(tmp, path)  # escritura atómica
+        return path
 
     async def disconnect_platform(self, platform: Platform) -> None:
         client = self.platforms[platform]

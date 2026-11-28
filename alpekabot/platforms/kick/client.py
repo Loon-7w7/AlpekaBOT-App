@@ -290,6 +290,10 @@ class KickClient(PlatformClient):
             except Exception:
                 log.exception("Kick: error consultando el estado del directo")
 
+    async def profile_image_url(self) -> str | None:
+        user = await self._call(AccountRole.STREAMER, self._api.current_user)  # con el permiso user:read
+        return user.get("profile_picture") or None
+
     async def refresh_stream(self) -> None:
         if self.streamer is None:
             return

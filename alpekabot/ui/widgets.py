@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Callable, Iterable
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPen
+from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractButton,
     QAbstractItemView,
@@ -243,6 +243,29 @@ class Avatar(QLabel):
             self.setPixmap(t.pixmap(icon, color, size // 2))
         else:
             self.setText(initials(text))
+        self._size, self._radius = size, radius
+
+    def set_image(self, pixmap: QPixmap) -> None:
+        """Foto en lugar de las iniciales: recortada al cuadrado y con las esquinas del avatar."""
+        side = min(pixmap.width(), pixmap.height())
+        square = pixmap.copy((pixmap.width() - side) // 2, (pixmap.height() - side) // 2, side, side)
+        square = square.scaled(self._size, self._size, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        out = QPixmap(self._size, self._size)
+        out.fill(Qt.transparent)
+        painter = QPainter(out)
+        painter.setRenderHint(QPainter.Antialiasing)
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(0, 0, self._size, self._size), self._radius, self._radius)
+        painter.setClipPath(path)
+        painter.drawPixmap(0, 0, square)
+        painter.end()
+        self.setText("")
+        self.setPixmap(out)
+
+    def clear_image(self, text: str) -> None:
+        """Vuelve a las iniciales."""
+        self.setPixmap(QPixmap())
+        self.setText(initials(text))
 
 
 def initials(name: str) -> str:

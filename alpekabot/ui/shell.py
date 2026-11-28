@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QSize, Qt, Signal
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QButtonGroup, QFrame, QLabel, QProgressBar, QPushButton, QSlider, QWidget
 
 from .. import __version__
@@ -192,6 +193,7 @@ class Sidebar(QFrame):
 
         # usuario (decorativo)
         self._avatar = Avatar("?", 40, t.ACCENT_SOFT, t.alpha(t.ACCENT, 0.15), t.alpha(t.ACCENT, 0.5))
+        self._name, self._has_photo = "?", False
         self._user = label("Sin cuenta", size=14, bold=True)
         self._presence_dot = Dot(t.TEXT_3, 7)
         self._presence_text = label("", size=11, mono=True)
@@ -215,7 +217,18 @@ class Sidebar(QFrame):
 
     def set_user(self, name: str) -> None:
         self._user.setText(name or "Sin cuenta")
-        self._avatar.setText(initials(name or "?"))
+        self._name = name or "?"
+        if not self._has_photo:
+            self._avatar.setText(initials(self._name))
+
+    def set_avatar(self, path) -> None:
+        """Foto de perfil del streamer en lugar de las iniciales (``None`` = iniciales)."""
+        pix = QPixmap(str(path)) if path else QPixmap()
+        self._has_photo = not pix.isNull()
+        if self._has_photo:
+            self._avatar.set_image(pix)
+        else:
+            self._avatar.clear_image(self._name)
 
     def set_presence(self, online: bool) -> None:
         color = t.GREEN if online else t.TEXT_3

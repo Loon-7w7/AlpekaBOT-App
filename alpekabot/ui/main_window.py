@@ -444,6 +444,7 @@ class MainWindow(QMainWindow):
         if state is ConnectionState.CONNECTED:
             self.chat.add_system(f"{platform.label}: conectado ({detail})", "ok")
             self._refresh_accounts()
+            asyncio.ensure_future(self._update_avatar(platform))
         elif state is ConnectionState.DISCONNECTED:
             self.chat.add_system(f"{platform.label}: desconectado")
         elif state is ConnectionState.ERROR:
@@ -483,6 +484,19 @@ class MainWindow(QMainWindow):
             acc = self._account(p, AccountRole.STREAMER)
             card.set_channel(acc.login if acc else "sin cuenta")
         self.sidebar.set_user(self._owner_name())
+        self._show_cached_avatar()
+
+    def _owner_platform(self) -> Platform | None:
+        """La plataforma cuyo streamer da el nombre y la foto de la barra lateral (la primera con cuenta)."""
+        return next((p for p in Platform if self._account(p, AccountRole.STREAMER)), None)
+
+    def _show_cached_avatar(self) -> None:
+        platform = self._owner_platform()
+        self.sidebar.set_avatar(self.bot.cached_avatar(platform) if platform else None)
+
+    async def _update_avatar(self, platform: Platform) -> None:
+        if platform is self._owner_platform() and await self.bot.fetch_avatar(platform):
+            self._show_cached_avatar()
 
     def _update_counters(self) -> None:
         items = self.sidebar.items

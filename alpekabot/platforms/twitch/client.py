@@ -299,6 +299,13 @@ class TwitchClient(PlatformClient):
         except Exception:
             log.debug("Twitch: no se pudo refrescar el directo tras el cambio", exc_info=True)
 
+    async def profile_image_url(self) -> str | None:
+        api, streamer_id = self._streamer_context()
+        # Se consume el generador entero (un solo usuario): cortarlo antes con first() lo cerraba a medias.
+        # La foto es pública: no pide permisos.
+        users = [u async for u in api.get_users(user_ids=[streamer_id])]
+        return (getattr(users[0], "profile_image_url", None) or None) if users else None
+
     # ----------------------------------------------- premios (fase 7)
     def _streamer_context(self) -> tuple[Twitch, str]:
         if not self.is_connected or self._streamer_api is None or self.streamer is None:
