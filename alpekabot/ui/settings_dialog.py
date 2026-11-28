@@ -41,7 +41,8 @@ BETA_IMPACT = (
     "• <b>Usa tus mismos datos</b> (comandos, canciones, cuentas): si la beta cambia algo, "
     "la versión estable podría no entenderlo.<br>"
     "• <b>No se puede volver atrás desde la app</b>: al desactivarlo seguirás con la beta "
-    "hasta que la estable la supere."
+    "hasta que la estable la supere.<br>"
+    "• A veces no hay ninguna beta publicada: entonces solo recibirás la versión estable."
 )
 
 log = logging.getLogger(__name__)
@@ -492,7 +493,11 @@ class SettingsDialog(ModalDialog):
                 self.reject()  # primero se cierra esta ventana: no se apilan ventanas modales
                 self.update_found.emit(info)
                 return
-            self._update_status.setText("Ya tienes la última versión.")
+            updater = self.bot.updater
+            if updater.beta and updater.beta_published is False:
+                self._update_status.setText("Ya tienes la última versión. Ahora mismo no hay ninguna beta publicada.")
+            else:
+                self._update_status.setText("Ya tienes la última versión.")
         self._check_btn.setEnabled(True)
 
     # ------------------------------------------------------------- guardado

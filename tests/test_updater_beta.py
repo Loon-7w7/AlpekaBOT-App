@@ -106,3 +106,19 @@ def test_descarga_la_beta_desde_su_etiqueta(tmp_path):
             return await updater.download(await updater.check())
 
     assert asyncio.run(main()).read_bytes() == INSTALLER
+
+
+def _published(tmp_path, **kwargs):
+    async def main():
+        async with _Github(Ed25519PrivateKey.generate(), **kwargs) as gh:
+            updater = gh.updater(tmp_path, "1.3.2", True)
+            await updater.check()
+            return updater.beta_published
+
+    return asyncio.run(main())
+
+
+def test_avisa_de_si_hay_o_no_beta_publicada(tmp_path):
+    assert _published(tmp_path) is True
+    assert _published(tmp_path, beta_version=None) is False
+    assert _published(tmp_path, api_ok=False) is None

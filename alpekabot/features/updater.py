@@ -120,6 +120,8 @@ class Updater:
                  api_url: str = RELEASES_API_URL, beta: bool = False) -> None:
         self.beta = beta  # también ofrece las pre-releases (canal beta)
         self._api_url = api_url
+        # Tras check() con la beta activa: True = hay alguna beta publicada, False = ninguna, None = no se pudo saber
+        self.beta_published: bool | None = None
         self.current = current
         self._url = releases_url.rstrip("/")
         self._key = public_key
@@ -134,6 +136,7 @@ class Updater:
             raise UpdateError(f"La versión actual ({self.current}) no tiene un formato válido.")
         timeout = aiohttp.ClientTimeout(total=CHECK_TIMEOUT_S)
         stable_error: UpdateError | None = None
+        self.beta_published = None
         candidates: list[UpdateInfo] = []
         try:
             async with aiohttp.ClientSession(timeout=timeout) as http:
@@ -172,6 +175,7 @@ class Updater:
                 match = _BETA_TAG_RE.match(release["tag_name"])
                 if match and release.get("prerelease") and not release.get("draft"):
                     tags.append((parse_version(match.group(1)), release["tag_name"]))
+            self.beta_published = bool(tags)
             if not tags:
                 return None
             version, tag = max(tags)
