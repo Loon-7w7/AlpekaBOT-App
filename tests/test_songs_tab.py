@@ -237,3 +237,39 @@ def test_reglas_y_salida_de_audio_van_en_un_modal_de_ajustes(page):
     assert dlg.isVisible()
     dlg.accept()
     assert not dlg.isVisible()
+
+
+def test_peticion_url_esta_en_la_cola_y_no_en_la_cabecera(page):
+    from PySide6.QtWidgets import QPushButton
+
+    def has_request_button(widget):
+        return any(b.text() == "Petición / URL" for b in widget.findChildren(QPushButton))
+
+    assert has_request_button(page._queue_page) and not has_request_button(page.actions)
+
+
+def test_vaciar_cola_esta_junto_a_peticion_y_no_en_la_cabecera(page):
+    from PySide6.QtWidgets import QPushButton
+
+    names = lambda w: {b.text() for b in w.findChildren(QPushButton)}  # noqa: E731
+    assert "Vaciar Cola" in names(page._queue_page) and "Vaciar Cola" not in names(page.actions)
+
+
+def test_la_barra_de_peticion_se_despliega_y_envia(page):
+    bar = page._request_bar
+    assert bar.isHidden() and bar.width() == 0
+    bar.expand()
+    QTest.qWait(450)  # termina la animación
+    assert not bar.isHidden() and bar.width() == bar.WIDTH
+    bar.submitted.disconnect(page._submit_request)  # sin lanzar la búsqueda real
+    sent = []
+    bar.submitted.connect(sent.append)
+    bar._input.setText("  https://youtu.be/dQw4w9WgXcQ ")
+    bar._input.returnPressed.emit()
+    assert sent == ["https://youtu.be/dQw4w9WgXcQ"]
+    bar.set_busy(True)
+    bar._input.returnPressed.emit()  # mientras busca no envía otra
+    assert len(sent) == 1
+    bar.collapse()
+    QTest.qWait(450)
+    assert bar.isHidden()

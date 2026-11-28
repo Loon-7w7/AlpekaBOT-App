@@ -8,7 +8,7 @@ import re
 
 import shiboken6
 
-from PySide6.QtCore import QRectF, QSize, Qt, QUrl, Signal
+from PySide6.QtCore import QEasingCurve, QRectF, QSize, Qt, QUrl, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
@@ -334,11 +334,15 @@ class SongsTab(QWidget):
         # ---------------------------------------------------- acciones cabecera
         self._req_btn = button("", object_name="success", slot=self._toggle_requests)
         clear = button("Vaciar Cola", "trash-2", slot=lambda: self.svc.repo.queue_clear_pending())
-        add = button("Petición / URL", "plus", "primary", self._open_request)
+        self._request_bar = RequestBar()
+        self._request_bar.submitted.connect(self._submit_request)
+        add = button("Petición / URL", "plus", "primary", self._request_bar.toggle)
+        self._req_msg = label("", size=12, wrap=True)
+        self._req_msg.hide()
         self.actions = QWidget()
         self._settings_btn = button("Ajustes", "settings", slot=self._open_settings,
                                     tooltip="Reglas de song requests y salida de audio")
-        self.actions.setLayout(hbox(self._req_btn, clear, self._settings_btn, add, spacing=10))
+        self.actions.setLayout(hbox(self._req_btn, self._settings_btn, spacing=10))
 
         # ----------------------------------------------------- tarjeta principal
         self._art = QStackedWidget()
@@ -419,12 +423,12 @@ class SongsTab(QWidget):
         self._source.addItem(t.icon("tv", t.ACCENT), "Twitch", Platform.TWITCH)
         self._source.addItem(t.icon("zap", t.KICK), "Kick", Platform.KICK)
         self._source.currentIndexChanged.connect(self.reload)
-        queue_head = hbox(None, self._filter, self._source, spacing=12)
+        queue_head = hbox(add, clear, self._request_bar, None, self._filter, self._source, spacing=12)
         self._queue_list = vbox(spacing=10)
         self._queue_empty = label("La cola está vacía. Los viewers piden canciones con !sr <enlace o nombre>.",
                                   color=t.TEXT_3, size=13, wrap=True)
         queue_page = QWidget()
-        queue_page.setLayout(vbox(queue_head, self._queue_list, self._queue_empty, None, spacing=12))
+        queue_page.setLayout(vbox(queue_head, self._req_msg, self._queue_list, self._queue_empty, None, spacing=12))
         # Las dos páginas van en el mismo layout y solo se ve una (un QStackedWidget no daba
         # a la lista la altura que necesita dentro del área con scroll)
         self._queue_page, self._backup_page = queue_page, self._build_backup()
@@ -639,10 +643,24 @@ class SongsTab(QWidget):
         self._bl_value.clear()
         self._bl_msg.clear()
 
-    def _open_request(self) -> None:
-        dlg = RequestDialog(self, self)
-        dlg.setAttribute(Qt.WA_DeleteOnClose)
-        dlg.open()
+    def _submit_request(self, text: str) -> None:
+        asyncio.ensure_future(self._do_request(text))
+
+    async def _do_request(self, text: str) -> None:
+        bar = self._request_bar
+        bar.set_busy(True)
+        self._req_msg.setText(f"<span style='color:{t.TEXT_3}'>Buscando…</span>")
+        self._req_msg.show()
+        try:
+            await self.svc.add_from_app(text, self.owner_name(), self.default_platform())
+        except (YouTubeError, ValueError) as exc:
+            self._req_msg.setText(f"<span style='color:{t.RED}'>{exc}</span>")
+            bar.set_busy(False)
+            return
+        bar.set_busy(False)
+        bar.clear()
+        bar.collapse()
+        self._req_msg.hide()
 
     # ------------------------------------------------------------- refresco
     def reload(self) -> None:
@@ -752,6 +770,79 @@ class SongsTab(QWidget):
         self._bar.set_value(pos / dur if dur else 0)
 
 
+class RequestBar(QWidget):
+    """«Petición / URL»: un campo que se despliega de izquierda a derecha junto a los botones de la cola."""
+
+    submitted = Signal(str)
+    WIDTH = 340
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._open = False
+        self._inner = QWidget(self)  # ancho fijo: al crecer la barra se descubre de izquierda a derecha
+        self._input = QLineEdit()
+        self._input.setPlaceholderText("Enlace de YouTube o «artista - canción»")
+        self._input.setMinimumHeight(36)
+        self._input.returnPressed.connect(self._submit)
+        self._ok = button("Añadir", "plus", "primary", self._submit)
+        close = icon_button("x", "Cerrar (Esc)", self.collapse, t.TEXT_2, 16)
+        self._inner.setLayout(hbox(self._input, self._ok, close, spacing=8))
+        self._inner.setFixedWidth(self.WIDTH)
+        self.setFixedHeight(max(36, self._inner.sizeHint().height()))
+        self.setFixedWidth(0)
+        self.hide()
+        # Ancho fijo en cada paso (no solo el máximo): así el layout le reserva sitio de verdad
+        self._anim = QVariantAnimation(self)
+        self._anim.setDuration(260)
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._anim.valueChanged.connect(lambda v: self.setFixedWidth(int(v)))
+        self._anim.finished.connect(self._on_finished)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt)
+        self._inner.setGeometry(0, 0, self.WIDTH, self.height())
+        super().resizeEvent(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 (Qt)
+        if event.key() == Qt.Key_Escape:
+            self.collapse()
+        else:
+            super().keyPressEvent(event)
+
+    def toggle(self) -> None:
+        self.collapse() if self._open else self.expand()
+
+    def expand(self) -> None:
+        self._open = True
+        self.show()
+        self._slide(self.WIDTH)
+        self._input.setFocus()
+
+    def collapse(self) -> None:
+        self._open = False
+        self._slide(0)
+
+    def _slide(self, end: int) -> None:
+        self._anim.stop()
+        self._anim.setStartValue(self.width())
+        self._anim.setEndValue(end)
+        self._anim.start()
+
+    def _on_finished(self) -> None:
+        if not self._open:
+            self.hide()
+
+    def _submit(self) -> None:
+        text = self._input.text().strip()
+        if text and self._ok.isEnabled():
+            self.submitted.emit(text)
+
+    def set_busy(self, busy: bool) -> None:
+        self._ok.setEnabled(not busy)
+
+    def clear(self) -> None:
+        self._input.clear()
+
+
 class SongSettingsDialog(ModalDialog):
     """«Ajustes»: reglas de song requests y ayuda de la salida de audio. Se crea una vez y se reabre."""
 
@@ -762,39 +853,3 @@ class SongSettingsDialog(ModalDialog):
         self.body.addWidget(output_help)
         self.footer.addStretch(1)
         self.footer.addWidget(button("Cerrar", slot=self.accept))
-
-
-class RequestDialog(ModalDialog):
-    """«+ Petición / URL»: añadir una canción a la cola como el streamer."""
-
-    def __init__(self, page: SongsTab, parent=None) -> None:
-        super().__init__("Nueva Petición", "Pega un enlace de YouTube o escribe el nombre de la canción. "
-                         "Se añade como el streamer (sin límites).", "music", parent, width=620)
-        self._page = page
-        self._input = QLineEdit()
-        self._input.setPlaceholderText("https://youtu.be/…  o  «artista - canción»")
-        self._input.setMinimumHeight(42)
-        self._input.returnPressed.connect(self._add)
-        self._msg = label("", size=12, wrap=True)
-        self.body.addWidget(self._input)
-        self.body.addWidget(self._msg)
-        self.footer.addWidget(button("Cancelar", slot=self.reject))
-        self.footer.addStretch(1)
-        self._ok = button("Añadir a la cola", "plus", "primary", self._add)
-        self.footer.addWidget(self._ok)
-
-    def _add(self) -> None:
-        text = self._input.text().strip()
-        if text and self._ok.isEnabled():
-            self._ok.setEnabled(False)
-            asyncio.ensure_future(self._do_add(text))
-
-    async def _do_add(self, text: str) -> None:
-        self._msg.setText(f"<span style='color:{t.TEXT_3}'>Buscando…</span>")
-        try:
-            await self._page.svc.add_from_app(text, self._page.owner_name(), self._page.default_platform())
-        except (YouTubeError, ValueError) as exc:
-            self._msg.setText(f"<span style='color:{t.RED}'>{exc}</span>")
-            self._ok.setEnabled(True)
-            return
-        self.accept()
