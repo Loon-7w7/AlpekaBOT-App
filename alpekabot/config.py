@@ -136,6 +136,12 @@ class CommandsConfig:
 
 
 @dataclass
+class UpdatesConfig:
+    # Canal beta: además de la versión estable, ofrece las pre-releases. Nunca baja de versión.
+    beta: bool = False
+
+
+@dataclass
 class AppConfig:
     twitch: TwitchConfig = field(default_factory=TwitchConfig)
     kick: KickConfig = field(default_factory=KickConfig)
@@ -145,6 +151,7 @@ class AppConfig:
     tts: TtsConfig = field(default_factory=TtsConfig)
     overlay: OverlayConfig = field(default_factory=OverlayConfig)
     commands: CommandsConfig = field(default_factory=CommandsConfig)
+    updates: UpdatesConfig = field(default_factory=UpdatesConfig)
 
     @classmethod
     def load(cls) -> "AppConfig":
@@ -165,6 +172,7 @@ class AppConfig:
             tts=_from_dict(TtsConfig, _migrate_tts(raw.get("tts", {}))),
             overlay=_from_dict(OverlayConfig, raw.get("overlay", {})),
             commands=_from_dict(CommandsConfig, raw.get("commands", {})),
+            updates=_from_dict(UpdatesConfig, raw.get("updates", {})),
         )
 
     def save(self) -> None:

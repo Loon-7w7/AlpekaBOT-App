@@ -88,7 +88,7 @@ class AlpekaBot:
         )
         self.tts.register_commands(self._command_service)
         self._save_config = save_config
-        self.updater = Updater()
+        self.updater = Updater(beta=config.updates.beta)
 
         # Overlay «Sonando ahora» para OBS
         self.overlay = OverlayServer(config.overlay, _overlay_token() if real_data else None)

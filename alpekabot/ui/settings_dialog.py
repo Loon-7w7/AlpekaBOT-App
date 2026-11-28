@@ -6,10 +6,11 @@ import asyncio
 import logging
 from html import escape
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -32,7 +33,16 @@ from ..platforms.kick.tunnel import normalize_domain
 from ..platforms.kick.webhook import WEBHOOK_PATH
 from ..platforms.base import PlatformError
 from . import theme as t
-from .widgets import ModalDialog, button, copy_text
+from .widgets import ModalDialog, Toggle, button, copy_text
+
+BETA_IMPACT = (
+    "Recibirás las novedades antes que nadie, pero:<br>"
+    "• <b>Puede fallar o cerrarse</b>: es una versión en pruebas, sin garantías.<br>"
+    "• <b>Usa tus mismos datos</b> (comandos, canciones, cuentas): si la beta cambia algo, "
+    "la versión estable podría no entenderlo.<br>"
+    "• <b>No se puede volver atrás desde la app</b>: al desactivarlo seguirás con la beta "
+    "hasta que la estable la supere."
+)
 
 log = logging.getLogger(__name__)
 
@@ -407,11 +417,62 @@ class SettingsDialog(ModalDialog):
         row.addStretch(1)
         lay.addLayout(row)
         lay.addWidget(self._update_status)
+
+        self._beta = Toggle(self.bot.config.updates.beta)
+        self._beta.toggled.connect(self._on_beta_toggled)
+        icon = QLabel()
+        icon.setPixmap(t.pixmap("triangle-alert", t.AMBER, 22))
+        title = QLabel(f"<span style='font-size:15px;font-weight:700;color:{t.AMBER}'>Versiones beta</span>")
+        self._beta_badge = QLabel("BETA ACTIVA")
+        self._beta_badge.setStyleSheet(
+            f"background:{t.AMBER};color:#000;font-weight:800;font-size:11px;border-radius:9px;padding:2px 9px;")
+        self._beta_badge.setVisible(self._beta.isChecked())
+        beta_row = QHBoxLayout()
+        beta_row.addWidget(icon)
+        beta_row.addWidget(title)
+        beta_row.addWidget(self._beta_badge)
+        beta_row.addStretch(1)
+        beta_row.addWidget(self._beta)
+        impact = QLabel(BETA_IMPACT)
+        impact.setWordWrap(True)
+        impact.setTextFormat(Qt.RichText)
+        beta_box = QFrame()
+        beta_box.setObjectName("betaCard")
+        beta_box.setStyleSheet(
+            f"#betaCard{{border:2px solid {t.AMBER};border-radius:12px;background:rgba(245,158,11,0.08);}}"
+            "#betaCard QLabel{background:transparent;}")
+        beta_lay = QVBoxLayout(beta_box)
+        beta_lay.setContentsMargins(16, 14, 16, 14)
+        beta_lay.setSpacing(10)
+        beta_lay.addLayout(beta_row)
+        beta_lay.addWidget(impact)
         page = QWidget()
         page_lay = QVBoxLayout(page)
         page_lay.addWidget(box)
+        page_lay.addWidget(beta_box)
         page_lay.addStretch(1)
         return page
+
+    def _on_beta_toggled(self, on: bool) -> None:
+        if on and not self._confirm_beta():
+            self._beta.setChecked(False)  # vuelve a llamar a este método con on=False
+            return
+        self.bot.config.updates.beta = on
+        self.bot.updater.beta = on
+        self.bot.config.save()
+        self._beta_badge.setVisible(on)
+
+    def _confirm_beta(self) -> bool:
+        box = QMessageBox(QMessageBox.Warning, "⚠ Activar versiones beta",
+                          "<b style='font-size:15px'>Las versiones beta son pruebas.</b><br><br>" + BETA_IMPACT,
+                          parent=self)
+        box.setTextFormat(Qt.RichText)
+        accept = box.addButton("Sí, quiero la beta", QMessageBox.AcceptRole)
+        cancel = box.addButton("Cancelar", QMessageBox.RejectRole)
+        box.setDefaultButton(cancel)  # Enter no activa la beta por accidente
+        box.setEscapeButton(cancel)
+        box.exec()
+        return box.clickedButton() is accept
 
     def _on_check_updates(self) -> None:
         self._check_btn.setEnabled(False)

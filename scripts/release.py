@@ -4,6 +4,7 @@
     python scripts/release.py export-key RUTA    guarda una copia de la clave privada
     python scripts/release.py build NOTAS.txt    empaqueta, crea el instalador y lo firma
     python scripts/release.py publish            sube dist/release a GitHub Releases
+    python scripts/release.py publish --beta     igual, pero como pre-release desde una rama que no sea main
 
 La clave privada vive en el Administrador de credenciales de Windows y nunca se imprime.
 Si se pierde, las copias ya instaladas no aceptarán más actualizaciones.
@@ -175,15 +176,44 @@ def cmd_build(args: argparse.Namespace) -> None:
     print(f"Listo: {installer} ({installer.stat().st_size / 1024 ** 2:.0f} MB)")
 
 
-def cmd_publish(_: argparse.Namespace) -> None:
+def _git(*args: str) -> str:
+    result = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True, check=True)
+    return result.stdout.strip()
+
+
+def _beta_target() -> str:
+    """Rama desde la que sale la beta: nunca main, y con su último commit ya subido."""
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD")
+    if branch in ("main", "master", "HEAD"):
+        raise ReleaseError(f"Una beta no puede salir de «{branch}». Cambia a una rama aparte (git switch -c beta).")
+    if _git("status", "--porcelain", "--untracked-files=no"):
+        raise ReleaseError("Hay cambios sin commit: la beta no coincidiría con el instalador. Haz commit primero.")
+    try:
+        remote = _git("rev-parse", f"origin/{branch}")
+    except subprocess.CalledProcessError:
+        raise ReleaseError(f"La rama «{branch}» no está en GitHub. Súbela: git push -u origin {branch}") from None
+    if remote != _git("rev-parse", "HEAD"):
+        raise ReleaseError(f"«{branch}» tiene commits sin subir. Haz git push antes de publicar.")
+    return branch
+
+
+def cmd_publish(args: argparse.Namespace) -> None:
     installer = RELEASE_DIR / f"AlpekaBOT-Setup-{__version__}.exe"
     files = [installer, RELEASE_DIR / MANIFEST_NAME, RELEASE_DIR / SIGNATURE_NAME]
     missing = [f.name for f in files if not f.is_file()]
     if missing:
         raise ReleaseError("Faltan archivos (ejecuta build primero): " + ", ".join(missing))
     notes = json.loads(files[1].read_text(encoding="utf-8"))["notes"]
-    subprocess.run(["gh", "release", "create", f"v{__version__}", *map(str, files), "--repo", REPO,
-                    "--title", f"AlpekaBOT {__version__}", "--notes", notes], check=True)
+    tag, title = f"v{__version__}", f"AlpekaBOT {__version__}"
+    extra: list[str] = []
+    if args.beta:
+        # Pre-release: GitHub no la marca como Latest, así que el actualizador (latest/download) no la ofrece.
+        tag, title = f"{tag}-beta", f"{title} (beta)"
+        extra = ["--prerelease", "--target", _beta_target()]
+    subprocess.run(["gh", "release", "create", tag, *map(str, files), "--repo", REPO,
+                    "--title", title, "--notes", notes, *extra], check=True)
+    if args.beta:
+        print("Beta publicada como pre-release: los testers la descargan a mano; los usuarios normales no la reciben.")
 
 
 def main() -> int:
@@ -196,7 +226,10 @@ def main() -> int:
     build = commands.add_parser("build")
     build.add_argument("notes", help="archivo de texto con las novedades")
     build.set_defaults(run=cmd_build)
-    commands.add_parser("publish").set_defaults(run=cmd_publish)
+    publish = commands.add_parser("publish")
+    publish.add_argument("--beta", action="store_true",
+                         help="pre-release (tag vX.Y.Z-beta) desde la rama actual; no afecta a main ni a Latest")
+    publish.set_defaults(run=cmd_publish)
     args = parser.parse_args()
     try:
         args.run(args)
