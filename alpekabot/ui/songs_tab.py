@@ -9,7 +9,7 @@ import re
 import shiboken6
 
 from PySide6.QtCore import QEasingCurve, QEvent, QRectF, QSize, Qt, QUrl, QVariantAnimation, Signal
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPixmap
+from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPainterPath, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QComboBox,
@@ -21,12 +21,14 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSlider,
     QStackedWidget,
+    QToolButton,
     QWidget,
 )
 
+from .. import credentials
 from ..core.models import Permission, Platform
 from ..features.songs import BLACKLIST_KINDS, Song, SongService, SongStatus
-from ..features.youtube import YouTubeError, format_duration
+from ..features.youtube import API_KEY_SECRET, YouTubeError, format_duration
 from . import theme as t
 from .commands_tab import ElidedLabel
 from .widgets import (
@@ -445,7 +447,8 @@ class SongsTab(QWidget):
 
         # ------------------------------------------------------ columna derecha
         # Reglas y salida de audio son configuración: van en una ventana modal («Ajustes»)
-        self._settings_dlg = SongSettingsDialog(self, self._build_rules(), self._build_output_help())
+        self._settings_dlg = SongSettingsDialog(self, self._build_rules(), self._build_youtube_key(),
+                                                self._build_output_help(), self.save_youtube_key)
 
         lower = hbox(queue_col, spacing=22)
         lower.setStretchFactor(queue_col, 1)
@@ -501,6 +504,52 @@ class SongsTab(QWidget):
             spacing=8, margins=(20, 18, 20, 18),
         )
         return frame("card", body)
+
+    def _build_youtube_key(self) -> QWidget:
+        """«Avanzado»: clave de API de YouTube (opcional), plegada. Sin ella !sr usa el método sin clave."""
+        self._yt_key = QLineEdit(credentials.get_secret(API_KEY_SECRET) or "")
+        self._yt_key.setEchoMode(QLineEdit.Password)
+        self._yt_key.setPlaceholderText("Pega aquí tu clave (opcional)")
+        self._yt_key.editingFinished.connect(self.save_youtube_key)
+        show = icon_button("eye-off", "Mostrar u ocultar la clave", None, t.TEXT_2, 16, "iconBox")
+        show.setCheckable(True)
+        show.toggled.connect(lambda on: self._yt_key.setEchoMode(QLineEdit.Normal if on else QLineEdit.Password))
+        help_label = label(
+            "Es <b>opcional</b>: sin clave, !sr busca igualmente. Con ella la búsqueda usa la API oficial "
+            "(gratis, unas 100 búsquedas por texto al día) y, si falla, vuelve al método sin clave.<br>"
+            "1. <a href='https://console.cloud.google.com/apis/library/youtube.googleapis.com'>Habilita YouTube "
+            "Data API v3</a> en Google Cloud.<br>"
+            "2. En <a href='https://console.cloud.google.com/apis/credentials'>Credenciales</a>: "
+            "<b>Crear credenciales → Clave de API</b>.<br>"
+            "3. Recomendado: restringe la clave solo a <i>YouTube Data API v3</i> y pégala aquí.",
+            color=t.TEXT_2, size=12, wrap=True)
+        help_label.setOpenExternalLinks(True)
+        card = frame("card", vbox(
+            hbox(icon_label("youtube", t.RED, 16), label("CLAVE DE API DE YOUTUBE", "sectionTitle"), None, spacing=8),
+            help_label, hbox(self._yt_key, show, spacing=8),
+            spacing=10, margins=(20, 18, 20, 18)))
+        fold = QToolButton()
+        fold.setText("Avanzado")
+        fold.setCheckable(True)
+        fold.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+
+        def on_fold(open_: bool) -> None:
+            card.setVisible(open_)
+            fold.setArrowType(Qt.DownArrow if open_ else Qt.RightArrow)
+
+        fold.toggled.connect(on_fold)
+        on_fold(False)  # siempre plegado al abrir: es opcional y casi nadie lo necesita
+        self._yt_fold = fold
+        box = QWidget()
+        box.setLayout(vbox(fold, card, spacing=8))
+        return box
+
+    def save_youtube_key(self) -> None:
+        key = self._yt_key.text().strip()
+        if key:
+            credentials.set_secret(API_KEY_SECRET, key)
+        else:
+            credentials.delete_secret(API_KEY_SECRET)
 
     def _build_output_help(self) -> QFrame:
         """La salida del reproductor no se elige aquí: YouTube necesitaría permiso de micrófono."""
@@ -861,10 +910,32 @@ class RequestBar(QWidget):
 class SongSettingsDialog(ModalDialog):
     """«Ajustes»: reglas de song requests y ayuda de la salida de audio. Se crea una vez y se reabre."""
 
-    def __init__(self, parent: QWidget, rules: QWidget, output_help: QWidget) -> None:
-        super().__init__("Ajustes de Song Requests", "Quién puede pedir canciones, límites y salida de audio. "
-                         "Los cambios se guardan al momento.", "settings", parent, width=560)
-        self.body.addWidget(rules)
-        self.body.addWidget(output_help)
+    def __init__(self, parent: QWidget, rules: QWidget, youtube_key: QWidget, output_help: QWidget,
+                 on_close=None) -> None:
+        super().__init__("Ajustes de Song Requests", "Quién puede pedir canciones, límites, clave de YouTube y "
+                         "salida de audio. Los cambios se guardan al momento.", "settings", parent, width=640)
+        self._on_close = on_close
+        inner = QWidget()
+        inner.setObjectName("srSettingsInner")
+        inner.setStyleSheet("QWidget#srSettingsInner { background: transparent; }")  # solo el contenedor
+        inner.setLayout(vbox(rules, output_help, youtube_key, None, spacing=16, margins=(0, 0, 8, 0)))
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.NoFrame)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        area.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        area.viewport().setAutoFillBackground(False)
+        area.setWidget(inner)
+        # Alto fijo: desplegar «Avanzado» no cambia el tamaño de la ventana (una ventana translúcida con
+        # sombra que crece de golpe hace fallar a Windows: «UpdateLayeredWindowIndirect failed»)
+        screen = QGuiApplication.primaryScreen()
+        available = screen.availableGeometry().height() if screen else 900
+        area.setFixedHeight(max(320, min(540, available - 300)))
+        self.body.addWidget(area)
         self.footer.addStretch(1)
         self.footer.addWidget(button("Cerrar", slot=self.accept))
+
+    def done(self, result: int) -> None:
+        if self._on_close is not None:
+            self._on_close()  # guarda la clave aunque se cierre sin salir del campo
+        super().done(result)

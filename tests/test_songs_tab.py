@@ -273,3 +273,57 @@ def test_la_barra_de_peticion_se_despliega_y_envia(page):
     bar.collapse()
     QTest.qWait(450)
     assert bar.isHidden()
+
+
+def test_la_clave_de_youtube_se_guarda_desde_los_ajustes_del_sr(page, monkeypatch):
+    from alpekabot.ui import songs_tab
+
+    saved = {}
+    monkeypatch.setattr(songs_tab.credentials, "set_secret", lambda k, v: saved.__setitem__(k, v))
+    monkeypatch.setattr(songs_tab.credentials, "delete_secret", lambda k: saved.pop(k, None))
+    page._yt_key.setText("  AIza-clave  ")
+    page._settings_dlg.open()
+    page._settings_dlg.accept()  # al cerrar se guarda aunque no se saliera del campo
+    assert saved == {songs_tab.API_KEY_SECRET: "AIza-clave"}
+    page._yt_key.setText("")
+    page.save_youtube_key()
+    assert saved == {}
+
+
+def _page_with_key(db, bot, player, monkeypatch, key: str):
+    from alpekabot.ui import songs_tab
+
+    monkeypatch.setattr(songs_tab.credentials, "get_secret", lambda k: key)  # sin tocar el keyring real
+    svc = SongService(bot.bus, SongRepository(db, bot.bus), SongRequestConfig(), None)
+    svc.attach_player(player)
+    return SongsTab(svc, bot.bus, player)
+
+
+def test_la_clave_de_youtube_esta_en_avanzado_plegado(db, bot, player, monkeypatch):
+    page = _page_with_key(db, bot, player, monkeypatch, "")
+    page._settings_dlg.open()
+    assert page._yt_fold.isVisible() and not page._yt_key.isVisible()  # plegada: solo se ve «Avanzado»
+    page._yt_fold.click()
+    assert page._yt_key.isVisible()
+    page._settings_dlg.reject()
+
+
+def test_avanzado_esta_al_final_y_plegado_aunque_haya_clave(db, bot, player, monkeypatch):
+    page = _page_with_key(db, bot, player, monkeypatch, "AIza-clave")
+    page._settings_dlg.open()
+    assert not page._yt_key.isVisible()  # oculto por defecto, también con una clave guardada
+    ys = {w: w.mapTo(page._settings_dlg, w.rect().topLeft()).y()
+          for w in (page._perm, page._yt_fold)}
+    assert ys[page._yt_fold] > ys[page._perm]  # «Avanzado» queda debajo de las reglas
+    page._settings_dlg.reject()
+
+
+def test_los_ajustes_del_sr_no_cambian_de_tamano_al_desplegar_avanzado(db, bot, player, monkeypatch):
+    page = _page_with_key(db, bot, player, monkeypatch, "")
+    dlg = page._settings_dlg
+    dlg.open()
+    before = dlg.height()
+    assert before <= 800  # cabe en pantallas normales
+    page._yt_fold.click()
+    assert dlg.height() == before  # la ventana no crece: el contenido se desplaza
+    dlg.reject()

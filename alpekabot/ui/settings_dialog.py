@@ -17,7 +17,9 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QTabWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -26,14 +28,13 @@ from .. import __version__, credentials
 from ..bot import AlpekaBot
 from ..core.models import AccountInfo, AccountRole, Platform
 from ..features.updater import UpdateError
-from ..features.youtube import API_KEY_SECRET
 from ..paths import IS_FROZEN
 from ..platforms.kick import auth as kick_auth
 from ..platforms.kick.tunnel import normalize_domain
 from ..platforms.kick.webhook import WEBHOOK_PATH
 from ..platforms.base import PlatformError
 from . import theme as t
-from .widgets import ModalDialog, Toggle, button, copy_text
+from .widgets import ChipGroup, ModalDialog, Toggle, button, copy_text
 
 BETA_IMPACT = (
     "Recibirás las novedades antes que nadie, pero:<br>"
@@ -159,17 +160,17 @@ class SettingsDialog(ModalDialog):
     update_found = Signal(object)  # UpdateInfo
 
     def __init__(self, bot: AlpekaBot, parent=None) -> None:
-        super().__init__("Configuración", "Cuentas de Twitch y Kick, clave de YouTube y actualizaciones.",
+        super().__init__("Configuración", "Cuentas de Twitch y Kick, ajustes generales y actualizaciones.",
                          "settings", parent, width=720)
         self.bot = bot
         self._update_task: asyncio.Task | None = None
 
         tabs = QTabWidget()
         self._rows: list[_AccountRow] = []
-        tabs.addTab(self._build_twitch_tab(), t.icon("tv", t.ACCENT), "Twitch")
-        tabs.addTab(self._build_kick_tab(), t.icon("zap", t.KICK), "Kick")
-        tabs.addTab(self._build_youtube_tab(), t.icon("youtube", t.RED), "YouTube")
-        tabs.addTab(self._build_updates_tab(), t.icon("download", t.TEXT_2), "Actualizaciones")
+        tabs.addTab(self._build_accounts_tab(), t.icon("users", t.ACCENT), "Cuentas")
+        tabs.addTab(self._build_general_tab(), t.icon("settings", t.TEXT_2), "General")
+        tabs.addTab(self._build_updates_page(), t.icon("download", t.TEXT_2), "Actualizaciones")
+        tabs.setMinimumHeight(480)
 
         self._note = QLabel()
         self._note.setStyleSheet(f"color:{t.AMBER}")
@@ -182,8 +183,52 @@ class SettingsDialog(ModalDialog):
         self.footer.addStretch(1)
         self.footer.addWidget(button("Guardar", "check", "primary", self._on_save))
 
+    # --------------------------------------------------------------- pestañas
+    @staticmethod
+    def _scrolled(*widgets: QWidget) -> QScrollArea:
+        """Una pestaña con desplazamiento: las tarjetas una debajo de otra."""
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        for w in widgets:
+            lay.addWidget(w)
+        lay.addStretch(1)
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.NoFrame)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        area.setWidget(page)
+        return area
+
+    def _build_accounts_tab(self) -> QWidget:
+        """Cuentas: un selector Twitch | Kick arriba y solo se ve la red elegida (la pestaña es una sola)."""
+        pages = {"twitch": self._scrolled(self._build_twitch_tab()), "kick": self._scrolled(self._build_kick_tab())}
+        self._network = ChipGroup([("Twitch", "twitch", "tv"), ("Kick", "kick", "zap")])
+        self._network.changed.connect(lambda key: [page.setVisible(k == key) for k, page in pages.items()])
+        self._network.set_value("twitch")
+        for key, page in pages.items():
+            page.setVisible(key == "twitch")
+        tab = QWidget()
+        lay = QVBoxLayout(tab)
+        lay.addWidget(self._network, 0, Qt.AlignLeft)
+        for page in pages.values():
+            lay.addWidget(page, 1)
+        self._network_pages = pages
+        return tab
+
+    def _build_general_tab(self) -> QScrollArea:
+        """Opciones generales de la app: de momento no hay ninguna."""
+        empty = QLabel("De momento no hay opciones generales. Aquí irán los ajustes de la app que no son de "
+                       "una plataforma.")
+        empty.setWordWrap(True)
+        empty.setStyleSheet(f"color:{t.TEXT_3}")
+        return self._scrolled(empty)
+
+    def _build_updates_page(self) -> QScrollArea:
+        """Actualizaciones: versión instalada, búsqueda y canal beta."""
+        return self._scrolled(self._build_updates_tab())
+
     # ---------------------------------------------------------------- twitch
-    def _build_twitch_tab(self) -> QWidget:
+    def _build_twitch_tab(self) -> QGroupBox:
         cfg = self.bot.config.twitch
 
         help_label = QLabel(_TWITCH_HELP)
@@ -194,7 +239,7 @@ class SettingsDialog(ModalDialog):
             _AccountRow(self, Platform.TWITCH, AccountRole.STREAMER, "Tu cuenta: el canal donde trabaja el bot"),
         ]
         self._rows += rows
-        acc_box = QGroupBox("Cuentas")
+        acc_box = QGroupBox("Twitch")
         acc_form = QFormLayout(acc_box)
         acc_form.addRow(help_label)
         acc_form.addRow("Bot:", rows[0])
@@ -210,12 +255,8 @@ class SettingsDialog(ModalDialog):
         self._auto_connect = QCheckBox("Conectar automáticamente al abrir AlpekaBOT")
         self._auto_connect.setChecked(cfg.auto_connect)
 
-        page = QWidget()
-        lay = QVBoxLayout(page)
-        lay.addWidget(acc_box)
-        lay.addWidget(self._auto_connect)
-        lay.addStretch(1)
-        return page
+        acc_form.addRow(self._auto_connect)
+        return acc_box
 
     # ------------------------------------------------------------------ kick
     @staticmethod
@@ -240,7 +281,7 @@ class SettingsDialog(ModalDialog):
         row.addWidget(copy)
         return row
 
-    def _build_kick_tab(self) -> QWidget:
+    def _build_kick_tab(self) -> QGroupBox:
         cfg = self.bot.config.kick
         ngrok_help = QLabel(
             "<b>1. ngrok</b> (gratis): regístrate en <a href='https://dashboard.ngrok.com/signup'>ngrok.com</a>, "
@@ -288,7 +329,7 @@ class SettingsDialog(ModalDialog):
             _AccountRow(self, Platform.KICK, AccountRole.STREAMER, "Tu cuenta de Kick: el canal donde trabaja el bot"),
         ]
         self._rows += rows
-        acc_box = QGroupBox("Cuentas de Kick")
+        acc_box = QGroupBox("Kick")
         acc_form = QFormLayout(acc_box)
         acc_form.addRow("Bot:", rows[0])
         acc_form.addRow("Streamer:", rows[1])
@@ -307,7 +348,7 @@ class SettingsDialog(ModalDialog):
             "de AlpekaBOT: si al conectar te dice que no lo está, pásale el nombre de tu canal."
         )
         shared_help.setWordWrap(True)
-        self._kick_own = QCheckBox("Usar mi propia app de Kick y ngrok (avanzado)")
+        self._kick_own = QCheckBox("Usar mi propia app de Kick y ngrok")
         self._kick_own.setChecked(cfg.use_own_app)
 
         def on_own(checked: bool) -> None:
@@ -317,14 +358,28 @@ class SettingsDialog(ModalDialog):
         self._kick_own.toggled.connect(on_own)
         on_own(cfg.use_own_app)
 
-        page = QWidget()
-        lay = QVBoxLayout(page)
-        lay.addWidget(shared_help)
-        lay.addWidget(acc_box)
-        lay.addWidget(self._kick_own)
-        lay.addWidget(box)
-        lay.addStretch(1)
-        return page
+        # Lo avanzado (app propia y ngrok) queda plegado: casi nadie lo usa
+        advanced = QWidget()
+        adv_lay = QVBoxLayout(advanced)
+        adv_lay.setContentsMargins(0, 0, 0, 0)
+        adv_lay.addWidget(self._kick_own)
+        adv_lay.addWidget(box)
+        fold = QToolButton()
+        fold.setText("Avanzado")
+        fold.setCheckable(True)
+        fold.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+
+        def on_fold(open_: bool) -> None:
+            advanced.setVisible(open_)
+            fold.setArrowType(Qt.DownArrow if open_ else Qt.RightArrow)
+
+        fold.toggled.connect(on_fold)
+        fold.setChecked(cfg.use_own_app)
+        on_fold(cfg.use_own_app)
+        acc_form.insertRow(0, shared_help)
+        acc_form.addRow(fold)
+        acc_form.addRow(advanced)
+        return acc_box
 
     def _update_webhook_url(self) -> None:
         domain = normalize_domain(self._ngrok_domain.text())
@@ -361,45 +416,6 @@ class SettingsDialog(ModalDialog):
         if self.bot.platforms[Platform.KICK].is_connected:
             self.note("Reconecta Kick para aplicar los cambios.")
         return True
-
-    # --------------------------------------------------------------- youtube
-    def _build_youtube_tab(self) -> QWidget:
-        help_label = QLabel(
-            "La clave se usa para <b>!sr</b> (buscar canciones y comprobar su duración).<br>"
-            "1. Entra en <a href='https://console.cloud.google.com/apis/library/youtube.googleapis.com'>"
-            "Google Cloud → YouTube Data API v3</a> y pulsa <b>Habilitar</b> (crea un proyecto si te lo pide).<br>"
-            "2. Ve a <a href='https://console.cloud.google.com/apis/credentials'>Credenciales</a> → "
-            "<b>Crear credenciales → Clave de API</b>.<br>"
-            "3. Recomendado: en la clave, <i>Restricciones de API</i> → solo <i>YouTube Data API v3</i>.<br>"
-            "4. Pégala aquí. Es gratis: unas 100 búsquedas por texto al día (los enlaces gastan mucho menos)."
-        )
-        help_label.setOpenExternalLinks(True)
-        help_label.setWordWrap(True)
-        self._yt_key = QLineEdit(credentials.get_secret(API_KEY_SECRET) or "")
-        self._yt_key.setEchoMode(QLineEdit.Password)
-        show = QPushButton("👁")
-        show.setFixedWidth(36)
-        show.setCheckable(True)
-        show.toggled.connect(lambda on: self._yt_key.setEchoMode(QLineEdit.Normal if on else QLineEdit.Password))
-        row = QHBoxLayout()
-        row.addWidget(self._yt_key)
-        row.addWidget(show)
-        box = QGroupBox("API de YouTube")
-        form = QFormLayout(box)
-        form.addRow(help_label)
-        form.addRow("Clave de API:", row)
-        page = QWidget()
-        lay = QVBoxLayout(page)
-        lay.addWidget(box)
-        lay.addStretch(1)
-        return page
-
-    def _save_youtube(self) -> None:
-        key = self._yt_key.text().strip()
-        if key:
-            credentials.set_secret(API_KEY_SECRET, key)
-        else:
-            credentials.delete_secret(API_KEY_SECRET)
 
     # ------------------------------------------------------- actualizaciones
     def _build_updates_tab(self) -> QWidget:
@@ -449,9 +465,9 @@ class SettingsDialog(ModalDialog):
         beta_lay.addWidget(impact)
         page = QWidget()
         page_lay = QVBoxLayout(page)
+        page_lay.setContentsMargins(0, 0, 0, 0)
         page_lay.addWidget(box)
         page_lay.addWidget(beta_box)
-        page_lay.addStretch(1)
         return page
 
     def _on_beta_toggled(self, on: bool) -> None:
@@ -511,7 +527,6 @@ class SettingsDialog(ModalDialog):
         return True
 
     def _on_save(self) -> None:
-        self._save_youtube()
         self._save_twitch()
         if not self._save_kick():  # con app propia valida los campos
             return

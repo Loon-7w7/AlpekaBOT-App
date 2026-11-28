@@ -249,7 +249,7 @@ class OfficialAPI:
     async def _get(self, endpoint: str, params: dict) -> dict:
         key = self._key_getter()
         if not key:
-            raise YouTubeError("Falta la clave de API de YouTube (Configuración → YouTube).")
+            raise YouTubeError("Falta la clave de API de YouTube (Canciones → Ajustes).")
         try:
             timeout = aiohttp.ClientTimeout(total=TIMEOUT_S)
             async with aiohttp.ClientSession(timeout=timeout) as session:
