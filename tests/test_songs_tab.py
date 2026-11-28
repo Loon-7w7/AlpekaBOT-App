@@ -180,3 +180,25 @@ def test_portada_en_el_cuadro_del_disco(page, monkeypatch):
     page.svc.stop()  # sin canción: vuelve el disco
     assert page._disc.property("thumb_id") == ""
     assert page._disc.pixmap().toImage() == disc
+
+
+def test_portada_en_la_barra_sonando_ahora(page, monkeypatch):
+    from PySide6.QtGui import QPixmap
+    from alpekabot.ui.shell import NowPlayingBar
+    from alpekabot.ui.songs_tab import Thumbnails
+
+    vid = "abcdefghijk"
+    cover = QPixmap(320, 180)
+    cover.fill(Qt.red)
+    monkeypatch.setitem(Thumbnails._raw, vid, cover)
+    bar = NowPlayingBar()
+    disc = bar._disc.pixmap().toImage()
+    page.svc.repo.backup_add(VideoInfo(vid, "Con portada", "Canal", "UC", 180))
+    page.svc.play()
+    bar.set_status(page.svc.status)
+    assert bar._disc.property("thumb_id") == vid
+    assert bar._disc.pixmap().toImage().pixelColor(22, 22) == Qt.red
+    page.svc.stop()  # sin canción: vuelve el icono del disco
+    bar.set_status(page.svc.status)
+    assert bar._disc.property("thumb_id") == ""
+    assert bar._disc.pixmap().toImage() == disc

@@ -9,6 +9,7 @@ from .. import __version__
 from ..core.models import ConnectionState, Platform
 from ..features.songs import SongStatus
 from . import theme as t
+from .songs_tab import Thumbnails
 from .widgets import (
     Avatar,
     Dot,
@@ -221,6 +222,9 @@ class Sidebar(QFrame):
 
 
 # ============================================================ barra inferior
+COVER_SIZE = 44  # cuadro de la portada (o el disco) en la barra «Sonando ahora»
+
+
 class NowPlayingBar(QFrame):
     play_pause = Signal()
     previous = Signal()
@@ -233,11 +237,11 @@ class NowPlayingBar(QFrame):
         super().__init__()
         self.setObjectName("nowBar")
         self.setStyleSheet(f"QFrame#nowBar {{ background: {t.BG_950}; border-top: 1px solid {t.BORDER}; }}")
-        disc = QLabel()
-        disc.setFixedSize(44, 44)
+        self._disc = disc = QLabel()
+        disc.setFixedSize(COVER_SIZE, COVER_SIZE)
         disc.setAlignment(Qt.AlignCenter)
-        disc.setPixmap(t.pixmap("disc", t.ACCENT_SOFT, 22))
-        disc.setStyleSheet(f"background: {t.BG_850}; border: 1px solid {t.BORDER}; border-radius: 10px;")
+        self._cover_id = ""
+        self._show_cover(None)
         self._pill = Pill("EN ESPERA", t.TEXT_3, size=10)
         self._by = label("", color=t.TEXT_3, size=11, mono=True)
         self._title = label("Nada sonando", size=14, bold=True)
@@ -272,8 +276,21 @@ class NowPlayingBar(QFrame):
         lay.setStretchFactor(center, 1)
         self.setLayout(lay)
 
+    def _show_cover(self, song) -> None:
+        """Portada de YouTube en el cuadro del disco (mientras llega, o si falla, el icono del disco)."""
+        video_id = song.video_id if song is not None else ""
+        if video_id and video_id == self._cover_id:  # pausar o cambiar el volumen no la recarga
+            return
+        self._cover_id = video_id
+        self._disc.setProperty("thumb_id", "")  # descarta una portada anterior que aún no llegó
+        self._disc.setPixmap(t.pixmap("disc", t.ACCENT_SOFT, 22))
+        self._disc.setStyleSheet(f"background: {t.BG_850}; border: 1px solid {t.BORDER}; border-radius: 10px;")
+        if video_id:
+            Thumbnails.load(self._disc, video_id, COVER_SIZE, radius=10)
+
     def set_status(self, st: SongStatus) -> None:
         s = st.current
+        self._show_cover(s)
         if s is None:
             self._pill.set("EN ESPERA", t.TEXT_3)
             self._by.setText("")
