@@ -617,6 +617,23 @@ class SongService:
         self.repo.backup_add(VideoInfo(song.video_id, song.title, song.channel, "", song.duration_s))
         return True
 
+    # ------------------------------------------------------------ lista negra
+    def block_song(self, song: Song) -> None:
+        """Manda el vídeo a la lista negra y lo saca del respaldo y de la cola. Si suena, salta."""
+        try:
+            self.repo.blacklist_add("video", song.video_id)
+        except ValueError:  # ya estaba bloqueado
+            pass
+        for entry in self.repo.backup_list():
+            if entry.video_id == song.video_id:
+                self._drop_from_backup(entry.id)
+        for pending in self.repo.queue_pending():
+            if pending.video_id == song.video_id:
+                self.repo.queue_remove(pending.id)
+        cur = self._current
+        if cur is not None and cur.video_id == song.video_id:
+            self._advance(remember=False)  # bloqueada a propósito: no se guarda como «anterior»
+
     # -------------------------------------------------------------- peticiones
     def _reject_reason(self, info: VideoInfo, is_owner: bool) -> str | None:
         # Los vídeos «no incrustables» SÍ se aceptan: el reproductor usa la página de YouTube

@@ -290,18 +290,28 @@ class BackupRow(QFrame):
         self.setLayout(lay)
 
 
-class MiniRow(QFrame):
-    """Fila compacta para la lista negra."""
+class BlacklistRow(QFrame):
+    """Fila de la lista negra (misma forma que las de cola y respaldo). Los vídeos enseñan su portada."""
 
-    def __init__(self, badge: str, title: str, subtitle: str, actions: list[QWidget]) -> None:
+    def __init__(self, page: "SongsTab", entry) -> None:
         super().__init__()
-        self.setObjectName("cardInner")
-        t_lbl = ElidedLabel(title)
-        t_lbl.setStyleSheet("font-weight: 600;")
-        texts = QWidget()
-        texts.setLayout(vbox(t_lbl, label(subtitle, color=t.TEXT_3, size=11, mono=True), spacing=2))
-        lay = hbox(source_box(badge, t.TEXT, 36), texts, *actions, spacing=8, margins=(10, 8, 8, 8))
-        lay.setStretchFactor(texts, 1)
+        self.setObjectName("row")
+        title = ElidedLabel(entry.value)
+        title.setStyleSheet("font-size: 14px; font-weight: 600;")
+        meta = hbox(Pill(BLACKLIST_KINDS[entry.kind].upper(), t.RED, size=9), spacing=8)
+        meta.addStretch(1)
+        info = QWidget()
+        info.setLayout(vbox(title, meta, spacing=4))
+        if entry.kind == "video":
+            thumb = Thumbnails.label(entry.value, entry.value)
+        else:
+            thumb = source_box(entry.kind[:2].upper(), t.TEXT, 44)
+        repo = page.svc.repo
+        lay = hbox(thumb, 6, info,
+                   icon_button("trash-2", "Quitar de la lista negra", lambda: repo.blacklist_remove(entry.id),
+                               t.TEXT_2, 16),
+                   spacing=8, margins=(16, 12, 14, 12))
+        lay.setStretchFactor(info, 1)
         self.setLayout(lay)
 
 
@@ -349,7 +359,11 @@ class SongsTab(QWidget):
                             self._title, self._channel, spacing=6))
         self._fav_btn = icon_button("star", "", self._toggle_favorite, t.TEXT_2, 22, "iconBox")
         self._fav_btn.hide()
-        top = hbox(self._art, info, self._fav_btn, icon_label("audio-lines", t.ACCENT, 32), spacing=20)
+        self._ban_btn = icon_button("ban", "Bloquear este vídeo (lista negra) y saltarlo", self._block_current,
+                                    t.RED, 22, "iconBox")
+        self._ban_btn.hide()
+        top = hbox(self._art, info, self._fav_btn, self._ban_btn, icon_label("audio-lines", t.ACCENT, 32),
+                   spacing=20)
         top.setStretchFactor(info, 1)
 
         self._play = icon_button("play", "Reproducir / pausar", self._toggle_play, "#ffffff", 20, "playBtn")
@@ -389,7 +403,8 @@ class SongsTab(QWidget):
 
         # -------------------------------------------- pestañas: cola | respaldo
         self._tabs = ChipGroup([("Cola de reproducción", "queue", "list-music"),
-                                ("Playlist de respaldo", "backup", "history")])
+                                ("Playlist de respaldo", "backup", "history"),
+                                ("Lista negra", "blacklist", "ban")])
         self._tabs.set_value("queue")
         self._tabs.changed.connect(self._show_list)
 
@@ -411,15 +426,16 @@ class SongsTab(QWidget):
         # Las dos páginas van en el mismo layout y solo se ve una (un QStackedWidget no daba
         # a la lista la altura que necesita dentro del área con scroll)
         self._queue_page, self._backup_page = queue_page, self._build_backup()
+        self._blacklist_page = self._build_blacklist()
         self._backup_page.hide()
+        self._blacklist_page.hide()
         queue_col = QWidget()
-        queue_col.setLayout(vbox(self._tabs, self._queue_page, self._backup_page, spacing=14))
+        queue_col.setLayout(vbox(self._tabs, self._queue_page, self._backup_page, self._blacklist_page, spacing=14))
 
         # ------------------------------------------------------ columna derecha
         side = QWidget()
         side.setFixedWidth(400)
-        side.setLayout(vbox(self._build_rules(), self._build_output_help(), self._build_blacklist(), None,
-                            spacing=16))
+        side.setLayout(vbox(self._build_rules(), self._build_output_help(), None, spacing=16))
 
         lower = hbox(queue_col, side, spacing=22)
         lower.setStretchFactor(queue_col, 1)
@@ -489,6 +505,7 @@ class SongsTab(QWidget):
     def _show_list(self, key: str) -> None:
         self._queue_page.setVisible(key == "queue")
         self._backup_page.setVisible(key == "backup")
+        self._blacklist_page.setVisible(key == "blacklist")
 
     def _build_backup(self) -> QWidget:
         self._backup_input = QLineEdit()
@@ -512,23 +529,27 @@ class SongsTab(QWidget):
         ))
         return page
 
-    def _build_blacklist(self) -> QFrame:
+    def _build_blacklist(self) -> QWidget:
         self._bl_kind = QComboBox()
         for k, text in BLACKLIST_KINDS.items():
             self._bl_kind.addItem(text, k)
         self._bl_value = QLineEdit()
-        self._bl_value.setPlaceholderText("Vídeo, canal o palabra")
+        self._bl_value.setPlaceholderText("Enlace de vídeo, canal o palabra en el título")
         self._bl_value.returnPressed.connect(self._add_blacklist)
         self._bl_msg = label("", color=t.RED, size=11, wrap=True)
-        self._bl_list = vbox(spacing=8)
-        body = vbox(
-            hbox(icon_label("ban", t.RED, 16), label("LISTA NEGRA", "sectionTitle"), None, spacing=8),
+        self._bl_list = vbox(spacing=10)
+        self._bl_empty = label("La lista negra está vacía. Aquí aparece lo que bloquees; se quita con la papelera.",
+                               color=t.TEXT_3, size=13, wrap=True)
+        page = QWidget()
+        page.setLayout(vbox(
             hbox(self._bl_kind, self._bl_value,
-                 icon_button("plus", "Bloquear", self._add_blacklist, t.TEXT, 16, "iconBox")),
-            self._bl_msg, self._bl_list,
-            spacing=10, margins=(20, 18, 20, 18),
-        )
-        return frame("card", body)
+                 icon_button("plus", "Bloquear", self._add_blacklist, t.TEXT, 16, "iconBox"), spacing=8),
+            label("Los vídeos, canales o palabras de esta lista no se aceptan como petición. El botón de la tarjeta "
+                  "de reproducción bloquea y salta lo que suena.", color=t.TEXT_3, size=12, wrap=True),
+            self._bl_msg, self._bl_list, self._bl_empty, None,
+            spacing=12,
+        ))
+        return page
 
     # ------------------------------------------------------------- acciones
     def _toggle_requests(self) -> None:
@@ -545,9 +566,14 @@ class SongsTab(QWidget):
         if self._status.current is not None:
             self.svc.toggle_favorite(self._status.current)
 
+    def _block_current(self) -> None:
+        if self._status.current is not None:
+            self.svc.block_song(self._status.current)
+
     def _update_favorite(self) -> None:
         cur = self._status.current
         self._fav_btn.setVisible(cur is not None)
+        self._ban_btn.setVisible(cur is not None)
         if cur is not None:
             set_star(self._fav_btn, self.svc.is_favorite(cur.video_id), 22)
 
@@ -637,11 +663,12 @@ class SongsTab(QWidget):
         self._queue_empty.setVisible(shown == 0)
         self._reload_backup(backup)
 
+        blocked = repo.blacklist_list()
+        self._tabs.set_text("blacklist", f"Lista negra ({len(blocked)})")
         clear_layout(self._bl_list)
-        for e in repo.blacklist_list():
-            self._bl_list.addWidget(MiniRow(e.kind[:2].upper(), e.value, BLACKLIST_KINDS[e.kind], [
-                icon_button("trash-2", "Quitar", lambda _=False, x=e: repo.blacklist_remove(x.id), t.TEXT_3, 14),
-            ]))
+        for e in blocked:
+            self._bl_list.addWidget(BlacklistRow(self, e))
+        self._bl_empty.setVisible(not blocked)
         self._update_favorite()
 
     def _reload_backup(self, backup: list[Song] | None = None) -> None:

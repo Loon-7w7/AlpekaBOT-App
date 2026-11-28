@@ -202,3 +202,29 @@ def test_portada_en_la_barra_sonando_ahora(page, monkeypatch):
     bar.set_status(page.svc.status)
     assert bar._disc.property("thumb_id") == ""
     assert bar._disc.pixmap().toImage() == disc
+
+
+def test_bloquear_lo_que_suena_lo_manda_a_la_lista_negra_y_salta(page):
+    svc = page.svc
+    svc.repo.backup_add(info(1))
+    svc.repo.backup_add(info(2))
+    svc.play()
+    first = page._status.current
+    assert not page._ban_btn.isHidden()
+    page._ban_btn.click()
+    assert [e.value for e in svc.repo.blacklist_list()] == [first.video_id]
+    assert all(s.video_id != first.video_id for s in svc.repo.backup_list())  # fuera del respaldo
+    assert page._status.current is not None and page._status.current.video_id != first.video_id  # saltó
+
+
+def test_pestana_lista_negra_muestra_y_quita(page):
+    from alpekabot.ui.songs_tab import BlacklistRow
+
+    page.svc.repo.blacklist_add("word", "spoiler")
+    page._tabs.set_value("blacklist")
+    page._show_list("blacklist")
+    rows = [page._bl_list.itemAt(i).widget() for i in range(page._bl_list.count())]
+    assert len(rows) == 1 and isinstance(rows[0], BlacklistRow)
+    assert page._backup_page.isHidden() and page._queue_page.isHidden() and not page._blacklist_page.isHidden()
+    page.svc.repo.blacklist_remove(page.svc.repo.blacklist_list()[0].id)
+    assert page._bl_list.count() == 0 and not page._bl_empty.isHidden()
