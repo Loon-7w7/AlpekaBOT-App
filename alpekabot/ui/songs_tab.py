@@ -8,7 +8,7 @@ import re
 
 import shiboken6
 
-from PySide6.QtCore import QEasingCurve, QRectF, QSize, Qt, QUrl, QVariantAnimation, Signal
+from PySide6.QtCore import QEasingCurve, QEvent, QRectF, QSize, Qt, QUrl, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
@@ -65,6 +65,7 @@ def source_box(text: str = "YT", color: str = t.RED, size: int = 44) -> QLabel:
 
 _VIDEO_ID = re.compile(r"[A-Za-z0-9_-]{11}")
 ART_SIZE = 110  # cuadro de la portada (o el disco) en la tarjeta principal
+BAN_SIZE, BAN_MARGIN = 28, 10  # botón de bloquear: esquina superior derecha de la tarjeta
 
 
 class Thumbnails:
@@ -366,10 +367,10 @@ class SongsTab(QWidget):
         self._fav_btn = icon_button("star", "", self._toggle_favorite, t.TEXT_2, 22, "iconBox")
         self._fav_btn.hide()
         self._ban_btn = icon_button("ban", "Bloquear este vídeo (lista negra) y saltarlo", self._block_current,
-                                    t.RED, 22, "iconBox")
+                                    t.RED, 14, "iconBox")
+        self._ban_btn.setFixedSize(BAN_SIZE, BAN_SIZE)
         self._ban_btn.hide()
-        top = hbox(self._art, info, self._fav_btn, self._ban_btn, icon_label("audio-lines", t.ACCENT, 32),
-                   spacing=20)
+        top = hbox(self._art, info, self._fav_btn, icon_label("audio-lines", t.ACCENT, 32), spacing=20)
         top.setStretchFactor(info, 1)
 
         self._play = icon_button("play", "Reproducir / pausar", self._toggle_play, "#ffffff", 20, "playBtn")
@@ -406,6 +407,10 @@ class SongsTab(QWidget):
                         spacing=10)
         controls.setStretchFactor(self._bar, 1)
         now_card = frame("cardHi", vbox(top, frame("hline"), controls, spacing=16, margins=(24, 22, 24, 20)))
+        # El botón de bloquear flota en la esquina superior derecha, como el de cerrar de una ventana
+        self._ban_btn.setParent(now_card)
+        now_card.installEventFilter(self)
+        self._now_card = now_card
 
         # -------------------------------------------- pestañas: cola | respaldo
         self._tabs = ChipGroup([("Cola de reproducción", "queue", "list-music"),
@@ -573,6 +578,16 @@ class SongsTab(QWidget):
     def _toggle_favorite(self) -> None:
         if self._status.current is not None:
             self.svc.toggle_favorite(self._status.current)
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 (Qt)
+        if obj is getattr(self, "_now_card", None) and event.type() in (QEvent.Resize, QEvent.Show):
+            self._place_ban_button()
+        return super().eventFilter(obj, event)
+
+    def _place_ban_button(self) -> None:
+        card = self._now_card
+        self._ban_btn.move(card.width() - BAN_SIZE - BAN_MARGIN, BAN_MARGIN)
+        self._ban_btn.raise_()
 
     def _block_current(self) -> None:
         if self._status.current is not None:
