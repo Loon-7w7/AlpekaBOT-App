@@ -336,7 +336,9 @@ class SongsTab(QWidget):
         clear = button("Vaciar Cola", "trash-2", slot=lambda: self.svc.repo.queue_clear_pending())
         add = button("Petición / URL", "plus", "primary", self._open_request)
         self.actions = QWidget()
-        self.actions.setLayout(hbox(self._req_btn, clear, add, spacing=10))
+        self._settings_btn = button("Ajustes", "settings", slot=self._open_settings,
+                                    tooltip="Reglas de song requests y salida de audio")
+        self.actions.setLayout(hbox(self._req_btn, clear, self._settings_btn, add, spacing=10))
 
         # ----------------------------------------------------- tarjeta principal
         self._art = QStackedWidget()
@@ -433,11 +435,10 @@ class SongsTab(QWidget):
         queue_col.setLayout(vbox(self._tabs, self._queue_page, self._backup_page, self._blacklist_page, spacing=14))
 
         # ------------------------------------------------------ columna derecha
-        side = QWidget()
-        side.setFixedWidth(400)
-        side.setLayout(vbox(self._build_rules(), self._build_output_help(), None, spacing=16))
+        # Reglas y salida de audio son configuración: van en una ventana modal («Ajustes»)
+        self._settings_dlg = SongSettingsDialog(self, self._build_rules(), self._build_output_help())
 
-        lower = hbox(queue_col, side, spacing=22)
+        lower = hbox(queue_col, spacing=22)
         lower.setStretchFactor(queue_col, 1)
         inner = QWidget()
         inner.setLayout(vbox(now_card, 4, lower, spacing=18, margins=(28, 22, 28, 24)))
@@ -552,6 +553,9 @@ class SongsTab(QWidget):
         return page
 
     # ------------------------------------------------------------- acciones
+    def _open_settings(self) -> None:
+        self._settings_dlg.open()
+
     def _toggle_requests(self) -> None:
         self.svc.set_enabled(not self.svc.config.enabled)
 
@@ -746,6 +750,18 @@ class SongsTab(QWidget):
         self._total.setText(fmt_mmss(dur) if dur else "--:--")
         self._bar.set_seekable(dur > 0)
         self._bar.set_value(pos / dur if dur else 0)
+
+
+class SongSettingsDialog(ModalDialog):
+    """«Ajustes»: reglas de song requests y ayuda de la salida de audio. Se crea una vez y se reabre."""
+
+    def __init__(self, parent: QWidget, rules: QWidget, output_help: QWidget) -> None:
+        super().__init__("Ajustes de Song Requests", "Quién puede pedir canciones, límites y salida de audio. "
+                         "Los cambios se guardan al momento.", "settings", parent, width=560)
+        self.body.addWidget(rules)
+        self.body.addWidget(output_help)
+        self.footer.addStretch(1)
+        self.footer.addWidget(button("Cerrar", slot=self.accept))
 
 
 class RequestDialog(ModalDialog):

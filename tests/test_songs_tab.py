@@ -228,3 +228,12 @@ def test_pestana_lista_negra_muestra_y_quita(page):
     assert page._backup_page.isHidden() and page._queue_page.isHidden() and not page._blacklist_page.isHidden()
     page.svc.repo.blacklist_remove(page.svc.repo.blacklist_list()[0].id)
     assert page._bl_list.count() == 0 and not page._bl_empty.isHidden()
+
+
+def test_reglas_y_salida_de_audio_van_en_un_modal_de_ajustes(page):
+    dlg = page._settings_dlg
+    assert not dlg.isVisible() and page._perm.window() is dlg  # ya no están en la página
+    page._settings_btn.click()
+    assert dlg.isVisible()
+    dlg.accept()
+    assert not dlg.isVisible()
