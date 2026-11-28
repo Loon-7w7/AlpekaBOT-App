@@ -89,3 +89,12 @@ def test_la_imagen_se_descarga_entera_aunque_llegue_por_trozos(qt_app):
 
     ok, big, html = asyncio.run(main())
     assert ok == image and big is None and html is None
+
+
+def test_elegir_la_cuenta_que_se_muestra_se_guarda_en_la_config(qt_app):
+    bot = AlpekaBot(AppConfig(), db_path=Path(tempfile.mkdtemp()) / "t.db")
+    assert bot.config.ui.profile_platform == ""  # automático
+    bot.set_profile_platform(Platform.KICK)
+    assert bot.config.ui.profile_platform == "kick"
+    bot.set_profile_platform(None)
+    assert bot.config.ui.profile_platform == ""

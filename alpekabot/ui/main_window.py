@@ -12,7 +12,16 @@ import logging
 
 from PySide6.QtCore import QEvent, QPoint, Qt, QTimer
 from PySide6.QtGui import QCloseEvent
-from PySide6.QtWidgets import QFrame, QInputDialog, QLabel, QMainWindow, QSizePolicy, QStackedWidget, QWidget
+from PySide6.QtWidgets import (
+    QFrame,
+    QInputDialog,
+    QLabel,
+    QMainWindow,
+    QMenu,
+    QSizePolicy,
+    QStackedWidget,
+    QWidget,
+)
 
 from .. import APP_NAME, __version__
 from ..bot import AlpekaBot
@@ -137,6 +146,7 @@ class MainWindow(QMainWindow):
         self.sidebar.page_requested.connect(self.show_page)
         self.sidebar.settings_requested.connect(self.open_settings)
         self.sidebar.power_requested.connect(self.open_connections)
+        self.sidebar.profile_requested.connect(self._choose_profile)
         self.now_bar = NowPlayingBar()
         self.now_bar.play_pause.connect(self._toggle_play)
         self.now_bar.previous.connect(lambda: bot.songs.previous())
@@ -463,11 +473,9 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- estado
     def _owner_name(self) -> str:
-        for p in Platform:
-            acc = self._account(p, AccountRole.STREAMER)
-            if acc:
-                return acc.display_name
-        return "Streamer"
+        platform = self._owner_platform()
+        acc = self._account(platform, AccountRole.STREAMER) if platform else None
+        return acc.display_name if acc else "Streamer"
 
     def _default_platform(self) -> Platform:
         connected = [p for p, c in self.bot.platforms.items() if c.is_connected]
@@ -487,8 +495,34 @@ class MainWindow(QMainWindow):
         self._show_cached_avatar()
 
     def _owner_platform(self) -> Platform | None:
-        """La plataforma cuyo streamer da el nombre y la foto de la barra lateral (la primera con cuenta)."""
-        return next((p for p in Platform if self._account(p, AccountRole.STREAMER)), None)
+        """La plataforma cuyo streamer da el nombre y la foto de la barra lateral: la elegida por el usuario
+        y, si no hay o ya no tiene cuenta, la primera con cuenta."""
+        chosen = self.bot.config.ui.profile_platform
+        accounts = [p for p in Platform if self._account(p, AccountRole.STREAMER)]
+        return next((p for p in accounts if p.value == chosen), accounts[0] if accounts else None)
+
+    def _choose_profile(self, pos) -> None:
+        """Clic en la tarjeta de usuario: menú para elegir de qué cuenta salen el nombre y la foto."""
+        menu = QMenu(self)
+        current = self._owner_platform()
+        for p in Platform:
+            acc = self._account(p, AccountRole.STREAMER)
+            if acc is None:
+                continue
+            action = menu.addAction(f"{p.label} · {acc.display_name}")
+            action.setCheckable(True)
+            action.setChecked(p is current)
+            action.triggered.connect(lambda _=False, plat=p: self._set_profile(plat))
+        if menu.isEmpty():
+            menu.addAction("Aún no hay ninguna cuenta de streamer conectada").setEnabled(False)
+        menu.setAttribute(Qt.WA_DeleteOnClose)
+        menu.popup(pos)  # popup(), no exec(): exec() frena las tareas de qasync
+
+    def _set_profile(self, platform: Platform) -> None:
+        self.bot.set_profile_platform(platform)
+        self._refresh_accounts()
+        if self.bot.cached_avatar(platform) is None:
+            asyncio.ensure_future(self._update_avatar(platform))
 
     def _show_cached_avatar(self) -> None:
         platform = self._owner_platform()

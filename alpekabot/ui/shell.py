@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QSize, Qt, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QButtonGroup, QFrame, QLabel, QProgressBar, QPushButton, QSlider, QWidget
 
@@ -142,6 +142,7 @@ class Sidebar(QFrame):
     page_requested = Signal(str)       # clave de la página
     settings_requested = Signal()
     power_requested = Signal()         # botón de apagado: abre el modal de conexiones
+    profile_requested = Signal(QPoint)  # clic en la tarjeta de usuario (posición global): elegir la cuenta
 
     def __init__(self) -> None:
         super().__init__()
@@ -205,11 +206,20 @@ class Sidebar(QFrame):
         user_box = frame("userCard", hbox(self._avatar, vbox(self._user, self._presence, spacing=2), None, power,
                                           spacing=12, margins=(16, 12, 14, 14)))
         user_box.setStyleSheet(f"QFrame#userCard {{ border-top: 1px solid {t.BORDER}; }}")
+        user_box.setCursor(Qt.PointingHandCursor)
+        user_box.setToolTip("Clic para elegir qué cuenta se muestra (Twitch o Kick)")
+        user_box.installEventFilter(self)
+        self._user_box = user_box
 
         cards = vbox(*self.cards.values(), spacing=8, margins=(14, 4, 14, 8))
         self.setLayout(vbox(self.logo, frame("hline"), 10, cards, frame("hline"), 4, nav, None, user_box,
                             spacing=0))
         self.set_presence(False)
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 (Qt)
+        if obj is getattr(self, "_user_box", None) and event.type() == QEvent.MouseButtonRelease                 and event.button() == Qt.LeftButton:
+            self.profile_requested.emit(event.globalPosition().toPoint())
+        return super().eventFilter(obj, event)
 
     def select(self, key: str) -> None:
         if key in self.items:

@@ -241,6 +241,11 @@ class AlpekaBot:
             return f"{platform.label}: {exc}"
         return None
 
+    def set_profile_platform(self, platform: Platform | None) -> None:
+        """Elige de qué cuenta de streamer salen el nombre y la foto de la barra lateral (``None`` = automático)."""
+        self.config.ui.profile_platform = platform.value if platform else ""
+        self._save_config()
+
     def cached_avatar(self, platform: Platform) -> Path | None:
         """La foto de perfil ya descargada de esa plataforma, si la hay."""
         path = avatar_path(platform)

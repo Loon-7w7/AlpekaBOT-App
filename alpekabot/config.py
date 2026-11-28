@@ -142,6 +142,12 @@ class UpdatesConfig:
 
 
 @dataclass
+class UiConfig:
+    # Cuenta del streamer cuyo nombre y foto salen en la barra lateral: "twitch", "kick" o "" (automático)
+    profile_platform: str = ""
+
+
+@dataclass
 class AppConfig:
     twitch: TwitchConfig = field(default_factory=TwitchConfig)
     kick: KickConfig = field(default_factory=KickConfig)
@@ -152,6 +158,7 @@ class AppConfig:
     overlay: OverlayConfig = field(default_factory=OverlayConfig)
     commands: CommandsConfig = field(default_factory=CommandsConfig)
     updates: UpdatesConfig = field(default_factory=UpdatesConfig)
+    ui: UiConfig = field(default_factory=UiConfig)
 
     @classmethod
     def load(cls) -> "AppConfig":
@@ -173,6 +180,7 @@ class AppConfig:
             overlay=_from_dict(OverlayConfig, raw.get("overlay", {})),
             commands=_from_dict(CommandsConfig, raw.get("commands", {})),
             updates=_from_dict(UpdatesConfig, raw.get("updates", {})),
+            ui=_from_dict(UiConfig, raw.get("ui", {})),
         )
 
     def save(self) -> None:
