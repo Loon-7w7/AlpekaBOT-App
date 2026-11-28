@@ -204,6 +204,22 @@ class AlpekaBot:
             if client.state is not ConnectionState.DISCONNECTED:
                 await client.disconnect()
 
+    async def connect_platform(self, platform: Platform) -> str | None:
+        """Conecta una sola plataforma. Devuelve el error para mostrarlo, o ``None`` si fue bien."""
+        client = self.platforms[platform]
+        if not client.is_configured:
+            return f"{platform.label}: configura la cuenta en Ajustes primero."
+        try:
+            await client.connect()
+        except PlatformError as exc:
+            return f"{platform.label}: {exc}"
+        return None
+
+    async def disconnect_platform(self, platform: Platform) -> None:
+        client = self.platforms[platform]
+        if client.state is not ConnectionState.DISCONNECTED:
+            await client.disconnect()
+
     @property
     def any_connected(self) -> bool:
         return any(c.is_connected for c in self.platforms.values())

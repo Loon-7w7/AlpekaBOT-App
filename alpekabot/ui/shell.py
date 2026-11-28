@@ -140,6 +140,7 @@ class PlatformCard(QFrame):
 class Sidebar(QFrame):
     page_requested = Signal(str)       # clave de la página
     settings_requested = Signal()
+    power_requested = Signal()         # botón de apagado: abre el modal de conexiones
 
     def __init__(self) -> None:
         super().__init__()
@@ -196,7 +197,8 @@ class Sidebar(QFrame):
         self._presence_text = label("", size=11, mono=True)
         self._presence = QWidget()
         self._presence.setLayout(hbox(self._presence_dot, self._presence_text, None, spacing=6))
-        power = icon_button("power", "", None, t.TEXT_3, 17, "iconBox")
+        power = icon_button("power", "Conexiones: conectar o desconectar Twitch y Kick", self.power_requested.emit,
+                            t.TEXT_3, 17, "iconBox")
         power.setFocusPolicy(Qt.NoFocus)
         user_box = frame("userCard", hbox(self._avatar, vbox(self._user, self._presence, spacing=2), None, power,
                                           spacing=12, margins=(16, 12, 14, 14)))

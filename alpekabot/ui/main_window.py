@@ -1,7 +1,7 @@
 """Ventana principal de AlpekaBOT (diseño «stitch_minimalist_desktop_ui_design»).
 
 Ventana sin marco: barra lateral a la izquierda; a la derecha, la cabecera (migas
-de pan, acciones de la página, Conectar, Ajustes y botones de la ventana), las
+de pan, acciones de la página, Ajustes y botones de la ventana), las
 páginas y la barra «Sonando ahora».
 """
 
@@ -27,6 +27,7 @@ from ..platforms.base import PlatformError
 from . import theme as t
 from .chat_view import ChatView
 from .commands_tab import CommandsTab
+from .connections_dialog import ConnectionsDialog
 from .frameless import CORNER_RADIUS, FramelessHelper, WindowButtons, WindowOutline, corner_styles, is_caption_area
 from .log_panel import LogPanel, QtLogHandler
 from .moderation_tab import ModerationTab
@@ -57,7 +58,6 @@ class MainWindow(QMainWindow):
     def __init__(self, bot: AlpekaBot, log_handler: QtLogHandler) -> None:
         super().__init__()
         self.bot = bot
-        self._busy = False
         self._closing = False
         self._ready_to_close = False
         self._settings: SettingsDialog | None = None
@@ -124,14 +124,13 @@ class MainWindow(QMainWindow):
         self._actions_slot = hbox(spacing=0)
         self._crumb_page.setMinimumWidth(80)  # puede encogerse si las acciones de la página no caben
         self._crumb_page.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
-        self._connect_btn = button("Conectar", "plug", "primary", self._toggle_connection)
         settings_btn = icon_button("sliders-horizontal", "Ajustes (cuentas, ngrok, YouTube)", self.open_settings,
                                    t.TEXT_2, 17, "iconBox")
         self._win_buttons = WindowButtons(self)
         sep = QFrame()
         sep.setFixedSize(1, 26)
         sep.setStyleSheet(f"background: {t.BORDER};")
-        self._header = frame("header", hbox(crumb, None, self._actions_slot, 4, self._connect_btn, settings_btn, 8,
+        self._header = frame("header", hbox(crumb, None, self._actions_slot, 4, settings_btn, 8,
                                             sep, 6, self._win_buttons, spacing=10, margins=(24, 0, 10, 0)))
         self._header.setFixedHeight(HEADER_H)
 
@@ -139,6 +138,7 @@ class MainWindow(QMainWindow):
         self.sidebar = Sidebar()
         self.sidebar.page_requested.connect(self.show_page)
         self.sidebar.settings_requested.connect(self.open_settings)
+        self.sidebar.power_requested.connect(self.open_connections)
         self.now_bar = NowPlayingBar()
         self.now_bar.play_pause.connect(self._toggle_play)
         self.now_bar.previous.connect(lambda: bot.songs.previous())
@@ -256,9 +256,9 @@ class MainWindow(QMainWindow):
             # si no, Windows la trae al frente después y la Configuración queda detrás.
             QTimer.singleShot(FIRST_RUN_SETTINGS_DELAY_MS, self._open_first_run_settings)
         elif cfg.auto_connect:
-            self._toggle_connection()
+            asyncio.ensure_future(self._connect())
         else:
-            self.chat.add_system("Pulsa «Conectar» (arriba a la derecha) para entrar al chat.")
+            self.chat.add_system("Pulsa el botón de apagado (abajo a la izquierda) para conectar al chat.")
 
     def _open_first_run_settings(self) -> None:
         if self._closing:
@@ -322,29 +322,19 @@ class MainWindow(QMainWindow):
         self._settings.raise_()
         self._settings.activateWindow()
 
-    def _toggle_connection(self) -> None:
-        if self._busy:
+    def open_connections(self) -> None:
+        """Botón de apagado: modal para conectar o desconectar cada plataforma."""
+        if self._closing:
             return
-        asyncio.ensure_future(self._disconnect() if self.bot.any_connected else self._connect())
+        dlg = ConnectionsDialog(self.bot, self)
+        dlg.setAttribute(Qt.WA_DeleteOnClose)
+        dlg.open()
 
     async def _connect(self) -> None:
-        self._busy = True
+        """Conexión automática al abrir la app."""
+        for err in await self.bot.connect_all():
+            self.chat.add_system(err, "error")
         self._update_actions()
-        try:
-            for err in await self.bot.connect_all():
-                self.chat.add_system(err, "error")
-        finally:
-            self._busy = False
-            self._update_actions()
-
-    async def _disconnect(self) -> None:
-        self._busy = True
-        self._update_actions()
-        try:
-            await self.bot.disconnect_all()
-        finally:
-            self._busy = False
-            self._update_actions()
 
     def _on_send(self, platform: Platform | None, text: str) -> None:
         asyncio.ensure_future(self._send(platform, text))
@@ -507,17 +497,6 @@ class MainWindow(QMainWindow):
 
     def _update_actions(self) -> None:
         connected = self.bot.any_connected
-        b = self._connect_btn
-        if self._busy:
-            b.setText("Conectando…" if not connected else "Desconectando…")
-            b.setEnabled(False)
-        else:
-            b.setEnabled(True)
-            b.setText("Desconectar" if connected else "Conectar")
-            b.setObjectName("" if connected else "primary")
-            b.setIcon(t.icon("unplug" if connected else "plug", t.TEXT_2 if connected else "#ffffff", 16))
-            b.style().unpolish(b)
-            b.style().polish(b)
         self.sidebar.set_presence(connected)
         self.chat.set_platforms([p for p, c in self.bot.platforms.items() if c.is_connected])
 
