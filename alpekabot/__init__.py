@@ -1,4 +1,4 @@
 """AlpekaBOT: bot de chat para Twitch y Kick."""
 
-__version__ = "1.3.3"
+__version__ = "2.0.0"
 APP_NAME = "AlpekaBOT"
