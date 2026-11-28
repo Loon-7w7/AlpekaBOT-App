@@ -208,7 +208,7 @@ class AlpekaBot:
         """Conecta una sola plataforma. Devuelve el error para mostrarlo, o ``None`` si fue bien."""
         client = self.platforms[platform]
         if not client.is_configured:
-            return f"{platform.label}: configura la cuenta en Ajustes primero."
+            return f"{platform.label}: configura la cuenta en Configuración primero."
         try:
             await client.connect()
         except PlatformError as exc:

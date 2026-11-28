@@ -86,4 +86,4 @@ class ConnectionsDialog(ModalDialog):
             row.button.setIcon(t.icon("unplug" if on else "plug", t.TEXT_2, 16))
             row.button.setEnabled(not row.busy and state is not ConnectionState.CONNECTING
                                   and (on or client.is_configured))
-            row.button.setToolTip("" if client.is_configured else "Configura la cuenta en Ajustes primero.")
+            row.button.setToolTip("" if client.is_configured else "Configura la cuenta en Configuración primero.")

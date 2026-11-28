@@ -1,7 +1,7 @@
 """Ventana principal de AlpekaBOT (diseño «stitch_minimalist_desktop_ui_design»).
 
 Ventana sin marco: barra lateral a la izquierda; a la derecha, la cabecera (migas
-de pan, acciones de la página, Ajustes y botones de la ventana), las
+de pan, acciones de la página y botones de la ventana), las
 páginas y la barra «Sonando ahora».
 """
 
@@ -124,13 +124,11 @@ class MainWindow(QMainWindow):
         self._actions_slot = hbox(spacing=0)
         self._crumb_page.setMinimumWidth(80)  # puede encogerse si las acciones de la página no caben
         self._crumb_page.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
-        settings_btn = icon_button("sliders-horizontal", "Ajustes (cuentas, ngrok, YouTube)", self.open_settings,
-                                   t.TEXT_2, 17, "iconBox")
         self._win_buttons = WindowButtons(self)
         sep = QFrame()
         sep.setFixedSize(1, 26)
         sep.setStyleSheet(f"background: {t.BORDER};")
-        self._header = frame("header", hbox(crumb, None, self._actions_slot, 4, settings_btn, 8,
+        self._header = frame("header", hbox(crumb, None, self._actions_slot, 12,
                                             sep, 6, self._win_buttons, spacing=10, margins=(24, 0, 10, 0)))
         self._header.setFixedHeight(HEADER_H)
 
@@ -251,7 +249,7 @@ class MainWindow(QMainWindow):
             asyncio.ensure_future(self._auto_check_updates())
         cfg = self.bot.config.twitch
         if not any(c.is_configured for c in self.bot.platforms.values()):
-            self.chat.add_system("Bienvenido a AlpekaBOT. Configura Twitch o Kick en «Ajustes» para empezar.")
+            self.chat.add_system("Bienvenido a AlpekaBOT. Configura Twitch o Kick en «Configuración» para empezar.")
             # Se espera a que la ventana termine de abrirse (reproductor incluido):
             # si no, Windows la trae al frente después y la Configuración queda detrás.
             QTimer.singleShot(FIRST_RUN_SETTINGS_DELAY_MS, self._open_first_run_settings)
@@ -299,7 +297,7 @@ class MainWindow(QMainWindow):
         if self._closing or self._update_dialog is not None:
             return
         if self._settings is not None:  # no apilar ventanas modales
-            self.chat.add_system(f"AlpekaBOT {info.version} disponible: Ajustes → Actualizaciones.")
+            self.chat.add_system(f"AlpekaBOT {info.version} disponible: Configuración → Actualizaciones.")
             return
         dialog = UpdateDialog(self.bot.updater, info, self.bot.any_connected, self)
         dialog.install_requested.connect(self._install_update)
